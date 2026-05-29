@@ -28,6 +28,15 @@
         </div>
     </header>
 
+    <!-- Tips Banner -->
+    <div class="tips-banner">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="16" x2="12" y2="12"/>
+            <line x1="12" y1="8" x2="12.01" y2="8"/>
+        </svg>
+        <span>内容有效期为2小时，请尽快下载。超出限制时将自动清空内容。点击预览可预览完整内容。</span>
+    </div>
     <!-- Main Content -->
     <main class="app-main">
         <!-- Left Panel: Upload & Settings -->
@@ -154,14 +163,19 @@
                                 <option value="default">使用默认 Logo</option>
                                 <option value="image">上传自定义 Logo</option>
                             </select>
+                            <p class="param-hint" id="defaultLogoHint" style="margin-top:4px;color:var(--text-muted);font-size:12px;white-space:nowrap;">
+                                默认 Logo 图片及配置可在 <a href="#" onclick="openSettings();return false;" style="color:var(--primary);">设置</a> 中修改
+                            </p>
                         </div>
                     </div>
-                    <div class="param-row hidden" id="logoUploadGroup">
+                    <div class="param-row" id="logoUploadGroup">
                         <div class="logo-upload-area">
-                            <div class="logo-preview" id="logoPreview">
-                                <span class="placeholder">+</span>
+                            <div class="logo-upload-zone" id="logoDropZone">
+                                <div class="logo-preview" id="logoPreview">
+                                    <span class="placeholder">+</span>
+                                </div>
                             </div>
-                            <input type="file" accept="image/*" onchange="handleLogoUpload(this.files)">
+                            <input type="file" accept="image/*" id="logoFileInput" onchange="handleLogoUpload(this.files)" style="display:none;">
                         </div>
                     </div>
                     <div class="param-row">
@@ -179,6 +193,11 @@
                             <div class="range-row">
                                 <input type="range" id="logoOpacity" min="0" max="100" value="80" step="5">
                                 <span class="value" id="logoOpacityVal">80%</span>
+                            </div>
+                            <label style="margin-top:8px">Logo距边框间距</label>
+                            <div class="range-row">
+                                <input type="range" id="logoMargin" min="0" max="200" value="20" step="1">
+                                <span class="value" id="logoMarginVal">20px</span>
                             </div>
                         </div>
                     </div>
@@ -462,27 +481,327 @@
                 </button>
             </div>
             <div class="modal-body">
-                <div class="settings-group">
-                    <h4>抠图设置</h4>
+                <div class="settings-section open">
+                    <div class="settings-section-header" onclick="toggleSettingsSection('bgSettings')">
+                        <h4>抠图设置</h4>
+                        <svg class="settings-section-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                    </div>
+                    <div class="settings-section-content" id="bgSettingsContent">
+                        <div class="param-row">
+                            <div class="param-group">
+                                <label>CPU 线程数限制（0=自动）</label>
+                                <div class="inline-row">
+                                    <input type="number" id="settingThreads" value="0" min="0" max="32">
+                                    <span class="info-text" id="currentCpuCores"></span>
+                                </div>
+                                <p class="param-hint">控制 rembg 模型并行线程数，建议保留 1-2 核给系统 <span class="info-text" id="recommendedThreads"></span></p>
+                            </div>
+                        </div>
+                        <div class="param-row">
+                            <label class="checkbox-label checkbox-label--nowrap">
+                                <input type="checkbox" id="settingDisableArena" checked>
+                                <span class="checkbox-custom"></span>
+                                禁用 ONNX 内存预分配（减少 OOM）
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-section">
+                    <div class="settings-section-header" onclick="toggleSettingsSection('logoSettings')">
+                        <h4>默认 Logo 设置</h4>
+                        <svg class="settings-section-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                    </div>
+                    <div class="settings-section-content" id="logoSettingsContent">
                     <div class="param-row">
                         <div class="param-group">
-                            <label>CPU 线程数限制（0=自动）</label>
-                            <input type="number" id="settingThreads" value="0" min="0" max="32">
-                            <p class="param-hint">控制 rembg 模型并行线程数，建议保留 1-2 核给系统</p>
+                            <label>Logo 图片</label>
+                            <div class="logo-upload-area">
+                                <div class="logo-preview" id="settingLogoPreview">
+                                    <span class="placeholder">+</span>
+                                </div>
+                                <div class="logo-upload-zone" id="settingLogoDropZone">
+                                    <span style="font-size:12px;color:var(--text-muted);">拖拽或点击上传</span>
+                                </div>
+                                <input type="file" accept="image/*" id="settingLogoFile" onchange="handleSettingLogoUpload(this.files)" style="display:none;">
+                            </div>
                         </div>
                     </div>
                     <div class="param-row">
-                        <label class="checkbox-label">
-                            <input type="checkbox" id="settingDisableArena" checked>
-                            <span class="checkbox-custom"></span>
-                            禁用 ONNX 内存预分配（减少 OOM）
-                        </label>
+                        <div class="param-group">
+                            <label>位置</label>
+                            <select id="settingLogoPosition">
+                                <option value="left-top">左上</option>
+                                <option value="center-top">中上</option>
+                                <option value="right-top">右上</option>
+                                <option value="left-center">左中</option>
+                                <option value="center">居中</option>
+                                <option value="right-center">右中</option>
+                                <option value="left-bottom">左下</option>
+                                <option value="center-bottom">中下</option>
+                                <option value="right-bottom">右下</option>
+                            </select>
+                        </div>
                     </div>
+                    <div class="param-row">
+                        <div class="param-group">
+                            <label>大小比例</label>
+                            <div class="range-row">
+                                <input type="range" id="settingLogoRatio" min="5" max="50" value="15" step="1">
+                                <span class="value" id="settingLogoRatioVal">15%</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="param-row">
+                        <div class="param-group">
+                            <label>透明度</label>
+                            <div class="range-row">
+                                <input type="range" id="settingLogoOpacity" min="0" max="100" value="80" step="5">
+                                <span class="value" id="settingLogoOpacityVal">80%</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="param-row">
+                        <div class="param-group">
+                            <label>Logo距边框间距</label>
+                            <div class="range-row">
+                                <input type="range" id="settingLogoMargin" min="0" max="200" value="20" step="1">
+                                <span class="value" id="settingLogoMarginVal">20px</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
                 </div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-outline" onclick="closeSettings()">取消</button>
                 <button class="btn btn-primary" onclick="saveSettings()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Reprocess Modal -->
+    <div class="modal-overlay hidden" id="reprocessOverlay">
+        <div class="modal settings-modal">
+            <div class="modal-header">
+                <h3>继续处理</h3>
+                <button class="modal-close" onclick="closeReprocess()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="param-row param-row--full">
+                    <div class="param-group">
+                        <label>源图片</label>
+                        <div class="reprocess-preview" id="reprocessPreview"></div>
+                    </div>
+                </div>
+                <!-- 去除背景 -->
+                <div class="settings-section" id="reprocessBg">
+                    <div class="settings-section-header" onclick="toggleReprocessSection('reprocessBg')">
+                        <h4 style="text-transform:none">去除背景（抠图）</h4>
+                        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer" onclick="event.stopPropagation()">
+                            <input type="checkbox" id="reprocessBgEnabled" onchange="toggleReprocessSection('reprocessBg')">
+                            启用
+                        </label>
+                    </div>
+                    <div class="settings-section-content" id="reprocessBgContent">
+                        <div class="param-row param-row--full" style="margin-top:8px">
+                            <div class="param-group">
+                                <label>抠图方式</label>
+                                <select id="reprocessBgMethod">
+                                    <option value="local">本地模型</option>
+                                    <option value="api">remove.bg API</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="param-row param-row--full">
+                            <div class="param-group">
+                                <label>选择模型</label>
+                                <select id="reprocessBgModel">
+                                    <option value="rmbg-1.4">RMBG-1.4 · 快速稳定 · 通用推荐</option>
+                                    <option value="birefnet">BiRefNet · 毛发细节 · 复杂场景</option>
+                                    <option value="rmbg-2.0">RMBG-2.0 · 边缘干净 · 质量优先</option>
+                                    <option value="u2net">U2Net · 经典模型 · 兼容性广</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="param-row param-row--full hidden" id="reprocessApiKeyRow">
+                            <div class="param-group">
+                                <label>API Key</label>
+                                <input type="text" id="reprocessApiKey" placeholder="输入你的 API Key">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- 添加 Logo -->
+                <div class="settings-section" id="reprocessLogo">
+                    <div class="settings-section-header" onclick="toggleReprocessSection('reprocessLogo')">
+                        <h4 style="text-transform:none">添加 Logo</h4>
+                        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer" onclick="event.stopPropagation()">
+                            <input type="checkbox" id="reprocessLogoEnabled" onchange="toggleReprocessSection('reprocessLogo')">
+                            启用
+                        </label>
+                    </div>
+                    <div class="settings-section-content" id="reprocessLogoContent">
+                        <div class="param-row param-row--full" style="margin-top:8px">
+                            <div class="param-group">
+                                <label>位置</label>
+                                <select id="reprocessLogoPosition">
+                                    <option value="left-top">左上</option>
+                                    <option value="center-top">中上</option>
+                                    <option value="right-top">右上</option>
+                                    <option value="left-center">左中</option>
+                                    <option value="center">居中</option>
+                                    <option value="right-center">右中</option>
+                                    <option value="left-bottom">左下</option>
+                                    <option value="center-bottom">中下</option>
+                                    <option value="right-bottom" selected>右下</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="param-row" style="grid-template-columns:1fr 1fr">
+                            <div class="param-group">
+                                <label>大小比例</label>
+                                <div class="range-row">
+                                    <input type="range" id="reprocessLogoRatio" min="5" max="50" value="15" step="1">
+                                    <span class="value" id="reprocessLogoRatioVal">15%</span>
+                                </div>
+                            </div>
+                            <div class="param-group">
+                                <label>透明度</label>
+                                <div class="range-row">
+                                    <input type="range" id="reprocessLogoOpacity" min="0" max="100" value="80" step="5">
+                                    <span class="value" id="reprocessLogoOpacityVal">80%</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="param-row param-row--full">
+                            <div class="param-group">
+                                <label>Logo距边框间距</label>
+                                <div class="range-row">
+                                    <input type="range" id="reprocessLogoMargin" min="0" max="200" value="20" step="1">
+                                    <span class="value" id="reprocessLogoMarginVal">20px</span>
+                                </div>
+                            </div>
+                        </div>
+                        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:4px;cursor:pointer">
+                            <input type="checkbox" id="reprocessLogoTile">
+                            平铺
+                        </label>
+                    </div>
+                </div>
+                <!-- 显式水印 -->
+                <div class="settings-section" id="reprocessWm">
+                    <div class="settings-section-header" onclick="toggleReprocessSection('reprocessWm')">
+                        <h4 style="text-transform:none">显式水印</h4>
+                        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer" onclick="event.stopPropagation()">
+                            <input type="checkbox" id="reprocessWmEnabled" onchange="toggleReprocessSection('reprocessWm')">
+                            启用
+                        </label>
+                    </div>
+                    <div class="settings-section-content" id="reprocessWmContent">
+                        <div class="param-row param-row--full" style="margin-top:8px">
+                            <div class="param-group">
+                                <label>水印模式</label>
+                                <select id="reprocessWmMode">
+                                    <option value="sparse">疏散（文字小而淡）</option>
+                                    <option value="dense">密集（文字大而醒目）</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="param-row" style="grid-template-columns:1fr 1fr">
+                            <div class="param-group">
+                                <label>水印文字</label>
+                                <input type="text" id="reprocessWmText" placeholder="输入水印文字">
+                            </div>
+                            <div class="param-group">
+                                <label>文字颜色</label>
+                                <select id="reprocessWmTextColor">
+                                    <option value="#FFFFFF">白色</option>
+                                    <option value="#000000">黑色</option>
+                                    <option value="#888888">灰色</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="param-row param-row--full">
+                            <div class="param-group">
+                                <label>位置</label>
+                                <select id="reprocessWmPosition">
+                                    <option value="left-top">左上</option>
+                                    <option value="center-top">中上</option>
+                                    <option value="right-top">右上</option>
+                                    <option value="left-center">左中</option>
+                                    <option value="center">居中</option>
+                                    <option value="right-center">右中</option>
+                                    <option value="left-bottom">左下</option>
+                                    <option value="center-bottom">中下</option>
+                                    <option value="right-bottom" selected>右下</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- 盲水印 -->
+                <div class="settings-section" id="reprocessBlind">
+                    <div class="settings-section-header" onclick="toggleReprocessSection('reprocessBlind')">
+                        <h4 style="text-transform:none">盲水印</h4>
+                        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer" onclick="event.stopPropagation()">
+                            <input type="checkbox" id="reprocessBlindEnabled" onchange="toggleReprocessSection('reprocessBlind')">
+                            启用
+                        </label>
+                    </div>
+                    <div class="settings-section-content" id="reprocessBlindContent">
+                        <div class="param-row param-row--full" style="margin-top:8px">
+                            <div class="param-group">
+                                <label>嵌入文字（用于版权识别）</label>
+                                <input type="text" id="reprocessBlindText" placeholder="输入版权文字，如「原创图片-张三-2026」">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- 压缩 -->
+                <div class="settings-section" id="reprocessCompress">
+                    <div class="settings-section-header" onclick="toggleReprocessSection('reprocessCompress')">
+                        <h4 style="text-transform:none">压缩</h4>
+                        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer" onclick="event.stopPropagation()">
+                            <input type="checkbox" id="reprocessCompressEnabled" checked onchange="toggleReprocessSection('reprocessCompress')">
+                            启用
+                        </label>
+                    </div>
+                    <div class="settings-section-content" id="reprocessCompressContent">
+                        <div class="param-row" style="grid-template-columns:1fr 1fr;margin-top:8px">
+                            <div class="param-group">
+                                <label>输出格式</label>
+                                <select id="reprocessOutputFormat">
+                                    <option value="JPEG">JPEG</option>
+                                    <option value="PNG">PNG</option>
+                                    <option value="WEBP">WEBP</option>
+                                </select>
+                            </div>
+                            <div class="param-group">
+                                <label>质量</label>
+                                <div class="range-row">
+                                    <input type="range" id="reprocessQuality" min="1" max="100" value="85" step="1">
+                                    <span class="value" id="reprocessQualityVal">85%</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="param-row" style="grid-template-columns:1fr 1fr;margin-top:8px">
+                            <div class="param-group">
+                                <label>最大文件 (KB，0=不限)</label>
+                                <input type="number" id="reprocessMaxFileSize" value="0" min="0">
+                            </div>
+                            <div class="param-group">
+                                <label>最大宽度 (px，0=不限)</label>
+                                <input type="number" id="reprocessMaxWidth" value="0" min="0">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeReprocess()">取消</button>
+                <button class="btn btn-primary" onclick="startReprocess()">开始处理</button>
             </div>
         </div>
     </div>

@@ -2,6 +2,7 @@ const API = '';
 let uploadedImages = [];
 let currentBatchId = null;
 let ws = null;
+let currentFeatures = [];
 
 // ─── Upload ───
 
@@ -171,6 +172,13 @@ function initPositionGrid() {
         grid.appendChild(btn);
     });
 }
+
+function updatePositionUI() {
+    const grid = document.getElementById('positionGrid');
+    grid.querySelectorAll('button').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.pos === selectedPosition);
+    });
+}
 initPositionGrid();
 
 // ─── Watermark position grid ───
@@ -196,6 +204,12 @@ function initWmPositionGrid() {
 }
 initWmPositionGrid();
 
+// Reprocess 抠图方式切换
+document.getElementById('reprocessBgMethod')?.addEventListener('change', e => {
+    const isApi = e.target.value === 'api';
+    document.getElementById('reprocessApiKeyRow').classList.toggle('hidden', !isApi);
+});
+
 // ─── Logo file upload ───
 
 let logoFileId = null;
@@ -214,21 +228,118 @@ function handleLogoUpload(files) {
         .catch(() => {});
 }
 
+// Logo 上传拖拽
+const logoDropZone = document.getElementById('logoDropZone');
+const logoFileInput = document.getElementById('logoFileInput');
+if (logoDropZone) {
+    logoDropZone.addEventListener('click', () => logoFileInput.click());
+    logoDropZone.addEventListener('dragover', e => { e.preventDefault(); logoDropZone.classList.add('dragover'); });
+    logoDropZone.addEventListener('dragleave', () => logoDropZone.classList.remove('dragover'));
+    logoDropZone.addEventListener('drop', e => {
+        e.preventDefault();
+        logoDropZone.classList.remove('dragover');
+        if (e.dataTransfer.files.length) handleLogoUpload(e.dataTransfer.files);
+    });
+}
+
+// 设置面板 Logo 上传拖拽
+const settingLogoDropZone = document.getElementById('settingLogoDropZone');
+const settingLogoFileInput = document.getElementById('settingLogoFile');
+if (settingLogoDropZone) {
+    settingLogoDropZone.addEventListener('click', () => settingLogoFileInput.click());
+    settingLogoDropZone.addEventListener('dragover', e => { e.preventDefault(); settingLogoDropZone.classList.add('dragover'); });
+    settingLogoDropZone.addEventListener('dragleave', () => settingLogoDropZone.classList.remove('dragover'));
+    settingLogoDropZone.addEventListener('drop', e => {
+        e.preventDefault();
+        settingLogoDropZone.classList.remove('dragover');
+        if (e.dataTransfer.files.length) handleSettingLogoUpload(e.dataTransfer.files);
+    });
+}
+
 document.getElementById('logoMode').addEventListener('change', e => {
-    const mode = e.target.value;
-    document.getElementById('logoUploadGroup').classList.toggle('hidden', mode !== 'image');
+    updateLogoPreview();
 });
+
+let defaultLogoConfig = { position: 'right-bottom', ratio: 0.15, opacity: 0.8 };
+
+// 初始化默认 Logo 预览
+async function initLogoPreview() {
+    // 加载默认 Logo 配置
+    try {
+        const res = await fetch(`${API}/api/config/default-logo`);
+        if (res.ok) {
+            defaultLogoConfig = await res.json();
+        }
+    } catch (e) {}
+
+    updateLogoPreview();
+}
+
+function updateLogoPreview() {
+    const mode = document.getElementById('logoMode').value;
+    const preview = document.getElementById('logoPreview');
+    const hint = document.getElementById('defaultLogoHint');
+    if (mode === 'default') {
+        document.getElementById('logoUploadGroup').classList.add('hidden');
+        preview.innerHTML = `<img src="${API}/api/logo-default?v=${Date.now()}">`;
+        selectedPosition = defaultLogoConfig.position;
+        document.getElementById('logoRatio').value = Math.round(defaultLogoConfig.ratio * 100);
+        document.getElementById('logoRatioVal').textContent = Math.round(defaultLogoConfig.ratio * 100) + '%';
+        document.getElementById('logoOpacity').value = Math.round(defaultLogoConfig.opacity * 100);
+        document.getElementById('logoOpacityVal').textContent = Math.round(defaultLogoConfig.opacity * 100) + '%';
+        document.getElementById('logoMargin').value = defaultLogoConfig.margin || 20;
+        document.getElementById('logoMarginVal').textContent = (defaultLogoConfig.margin || 20) + 'px';
+        if (hint) hint.classList.remove('hidden');
+        updatePositionUI();
+    } else {
+        document.getElementById('logoUploadGroup').classList.remove('hidden');
+        if (hint) hint.classList.add('hidden');
+        if (logoFileId) {
+            preview.innerHTML = `<img src="${API}/api/thumbnail/${logoFileId}">`;
+        } else {
+            preview.innerHTML = `<span class="placeholder">+</span>`;
+        }
+    }
+}
+
+// 页面加载时初始化
+window.addEventListener('load', initLogoPreview);
 
 // ─── Range slider ───
 
 document.querySelectorAll('input[type="range"]').forEach(input => {
-    const display = input.parentElement.querySelector('.value');
+    const display = input.parentElement.querySelector('.value, .value-input');
     if (display) {
         input.addEventListener('input', () => {
-            const suffix = display.id.includes('Ratio') || display.id.includes('Opacity') || display.id.includes('quality') ? '%' : '';
-            display.textContent = input.value + suffix;
+            const suffix = display.id.includes('Margin') ? 'px' : (display.id.includes('Ratio') || display.id.includes('Opacity') || display.id.includes('quality') || display.id.includes('settingLogo') ? '%' : '');
+            if (display.tagName === 'INPUT') {
+                display.value = input.value + suffix;
+            } else {
+                display.textContent = input.value + suffix;
+            }
         });
     }
+});
+
+// 可编辑数值输入 → 滑块同步
+document.querySelectorAll('.value-input').forEach(input => {
+    input.addEventListener('input', () => {
+        const raw = input.value.replace(/[^\d.]/g, '');
+        const num = parseFloat(raw);
+        if (isNaN(num)) return;
+        const sliderId = input.id.replace('Val', '');
+        const slider = document.getElementById(sliderId);
+        if (!slider) return;
+        const clamped = Math.min(Math.max(num, parseInt(slider.min)), parseInt(slider.max));
+        slider.value = clamped;
+        input.value = clamped;
+    });
+    input.addEventListener('blur', () => {
+        const sliderId = input.id.replace('Val', '');
+        const slider = document.getElementById(sliderId);
+        if (!slider) return;
+        input.value = slider.value;
+    });
 });
 
 // ─── Collect current config ───
@@ -245,6 +356,7 @@ function collectConfig() {
     form.append('logo_position', selectedPosition);
     form.append('logo_ratio', document.getElementById('logoRatio').value / 100);
     form.append('logo_opacity', document.getElementById('logoOpacity').value / 100);
+    form.append('logo_margin', parseInt(document.getElementById('logoMargin').value) || 20);
     form.append('logo_tile', document.getElementById('logoTile').checked);
     if (logoMode === 'image' && logoFileId) {
         form.append('logo_file_id', logoFileId);
@@ -268,12 +380,23 @@ function collectConfig() {
     return form;
 }
 
+function collectFeatures() {
+    const features = [];
+    if (document.getElementById('enableBgRemoval').checked) features.push('bg');
+    if (document.getElementById('enableLogo').checked) features.push('logo');
+    if (document.getElementById('enableWatermark').checked) features.push('watermark');
+    if (document.getElementById('enableBlindWatermark').checked) features.push('blind');
+    if (document.getElementById('enableCompress').checked) features.push('compress');
+    return features;
+}
+
 // ─── Process ───
 
 async function startProcess() {
     const btn = document.getElementById('processBtn');
     btn.disabled = true;
     btn.textContent = '处理中...';
+    currentFeatures = collectFeatures();
 
     try {
         const res = await fetch(`${API}/api/process`, { method: 'POST', body: collectConfig() });
@@ -297,6 +420,9 @@ function initResultCards(batchId) {
         const card = document.createElement('div');
         card.className = 'result-card';
         card.id = cardId;
+        card.dataset.runId = batchId;
+        card.dataset.imageId = img.id;
+        card.dataset.features = currentFeatures.join(',');
         card.innerHTML = `
             <div class="status-processing"><div class="spinner"></div><div class="text">处理中...</div></div>
             <div class="meta"><span class="filename">${img.filename}</span></div>
@@ -370,6 +496,8 @@ function updateResultCard(result, itemPct) {
         `;
     } else if (result.status === 'done') {
         const meta = uploadedImages.find(i => i.id === result.id);
+        card.dataset.features = currentFeatures.join(',');
+        const featuresStr = card.dataset.features;
         card.innerHTML = `
             <div class="preview-row">
                 <div class="before">
@@ -389,7 +517,8 @@ function updateResultCard(result, itemPct) {
             <div class="actions">
                 <a class="btn btn-primary btn-sm" href="${API}${result.output_url}" download>下载</a>
                 <button class="btn btn-outline btn-sm" onclick="showPreview('${result.id}', '${API}${result.output_url}', '${result.filename}')">预览</button>
-                <button class="btn btn-outline btn-sm" onclick="openEditor('${result.id}')">手动抠图</button>
+                <button class="btn btn-outline btn-sm" onclick="openEditor('${result.id}')">修改</button>
+                <button class="btn btn-outline btn-sm" onclick="openReprocess('${result.run_id}', '${result.id}', '${featuresStr}')">继续处理</button>
                 <button class="btn btn-danger btn-sm" onclick="deleteResult('result-${result.id}')">删除</button>
             </div>
         `;
@@ -404,7 +533,7 @@ function updateResultCard(result, itemPct) {
                 <span class="size">${(result.output_size / 1024 / 1024).toFixed(2)} MB</span>
             </div>
             <div class="actions">
-                <button class="btn btn-outline btn-sm" onclick="openEditor('${result.id}')">手动抠图</button>
+                <button class="btn btn-outline btn-sm" onclick="openEditor('${result.id}')">修改</button>
                 <button class="btn btn-danger btn-sm" onclick="deleteResult('result-${result.id}')">删除</button>
             </div>
         `;
@@ -416,7 +545,243 @@ function cancelProcess() {
 }
 
 function downloadAll() {
-    window.location.href = `${API}/api/download-all?batch_id=${currentBatchId || ''}`;
+    const items = [];
+    document.querySelectorAll('#resultGrid .result-card').forEach(card => {
+        const link = card.querySelector('.actions a[download]');
+        if (!link) return;
+        const href = link.getAttribute('href');
+        // API 前缀处理: 如果有 API 前缀则去掉
+        const path = href.replace(API, '');
+        // 解析 /api/download/{run_id}/{image_id}
+        const match = path.match(/\/api\/download\/([^/]+)\/([^/]+)/);
+        if (match) {
+            items.push({ run_id: match[1], image_id: match[2] });
+        }
+    });
+    if (!items.length) {
+        alert('没有可下载的处理结果');
+        return;
+    }
+    fetch(`${API}/api/download-all`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
+    })
+    .then(res => {
+        if (!res.ok) throw new Error('下载失败');
+        return res.blob();
+    })
+    .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'processed_images.zip';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    })
+    .catch(err => alert(err.message));
+}
+
+// ─── 继续处理 ───
+
+let reprocessSourceId = null;
+let reprocessRunId = null;
+
+function openReprocess(runId, imageId, excludeFeatures) {
+    reprocessSourceId = imageId;
+    reprocessRunId = runId;
+
+    const exclude = excludeFeatures ? excludeFeatures.split(',').filter(Boolean) : [];
+
+    document.getElementById('reprocessPreview').innerHTML =
+        `<img src="${API}/api/result-thumbnail/${runId}/${imageId}?t=${Date.now()}">`;
+
+    // 显示所有分区，排除已处理的功能
+    const sections = ['reprocessBg', 'reprocessLogo', 'reprocessWm', 'reprocessBlind', 'reprocessCompress'];
+    const featureKeys = ['bg', 'logo', 'watermark', 'blind', 'compress'];
+    sections.forEach((id, i) => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.classList.toggle('hidden', exclude.includes(featureKeys[i]));
+        }
+    });
+
+    // 抠图：初始化为未启用，从主面板复制方法/模型，API Key
+    document.getElementById('reprocessBgEnabled').checked = false;
+    document.getElementById('reprocessBg').classList.remove('open');
+    document.getElementById('reprocessBgMethod').value = document.getElementById('bgMethod').value;
+    document.getElementById('reprocessBgModel').value = document.getElementById('bgModel').value;
+    document.getElementById('reprocessApiKey').value = savedApiKey || '';
+    const isBgApi = document.getElementById('reprocessBgMethod').value === 'api';
+    document.getElementById('reprocessApiKeyRow').classList.toggle('hidden', !isBgApi);
+
+    // Logo：从默认配置初始化
+    document.getElementById('reprocessLogoEnabled').checked = false;
+    document.getElementById('reprocessLogo').classList.remove('open');
+    document.getElementById('reprocessLogoPosition').value = defaultLogoConfig.position || 'right-bottom';
+    document.getElementById('reprocessLogoRatio').value = Math.round((defaultLogoConfig.ratio || 0.15) * 100);
+    document.getElementById('reprocessLogoRatioVal').textContent = Math.round((defaultLogoConfig.ratio || 0.15) * 100) + '%';
+    document.getElementById('reprocessLogoOpacity').value = Math.round((defaultLogoConfig.opacity || 0.8) * 100);
+    document.getElementById('reprocessLogoOpacityVal').textContent = Math.round((defaultLogoConfig.opacity || 0.8) * 100) + '%';
+    document.getElementById('reprocessLogoMargin').value = defaultLogoConfig.margin || 20;
+    document.getElementById('reprocessLogoMarginVal').textContent = (defaultLogoConfig.margin || 20) + 'px';
+    document.getElementById('reprocessLogoTile').checked = false;
+
+    // 显式水印
+    document.getElementById('reprocessWmEnabled').checked = false;
+    document.getElementById('reprocessWm').classList.remove('open');
+    document.getElementById('reprocessWmMode').value = document.getElementById('wmMode').value;
+    document.getElementById('reprocessWmText').value = document.getElementById('wmText').value || '';
+    document.getElementById('reprocessWmTextColor').value = document.getElementById('wmTextColor').value;
+    document.getElementById('reprocessWmPosition').value = selectedWmPosition;
+
+    // 盲水印
+    document.getElementById('reprocessBlindEnabled').checked = false;
+    document.getElementById('reprocessBlind').classList.remove('open');
+    document.getElementById('reprocessBlindText').value = document.getElementById('wmBlindText').value || '';
+
+    // 压缩：从主面板复制设置
+    document.getElementById('reprocessCompressEnabled').checked = true;
+    document.getElementById('reprocessCompress').classList.add('open');
+    document.getElementById('reprocessOutputFormat').value = document.getElementById('outputFormat').value;
+    document.getElementById('reprocessQuality').value = document.getElementById('quality').value;
+    document.getElementById('reprocessQualityVal').textContent = document.getElementById('quality').value + '%';
+    document.getElementById('reprocessMaxFileSize').value = document.getElementById('maxFileSize').value;
+    document.getElementById('reprocessMaxWidth').value = document.getElementById('maxWidth').value;
+
+    document.getElementById('reprocessOverlay').classList.remove('hidden');
+}
+
+function closeReprocess() {
+    document.getElementById('reprocessOverlay').classList.add('hidden');
+    reprocessSourceId = null;
+    reprocessRunId = null;
+}
+
+function toggleReprocessSection(id) {
+    const section = document.getElementById(id);
+    if (section) section.classList.toggle('open');
+}
+
+function collectReprocessFeatures() {
+    const features = [];
+    if (document.getElementById('reprocessBgEnabled').checked) features.push('bg');
+    if (document.getElementById('reprocessLogoEnabled').checked) features.push('logo');
+    if (document.getElementById('reprocessWmEnabled').checked) features.push('watermark');
+    if (document.getElementById('reprocessBlindEnabled').checked) features.push('blind');
+    if (document.getElementById('reprocessCompressEnabled').checked) features.push('compress');
+    return features;
+}
+
+async function startReprocess() {
+    const bgEnabled = document.getElementById('reprocessBgEnabled').checked;
+    const logoEnabled = document.getElementById('reprocessLogoEnabled').checked;
+    const wmEnabled = document.getElementById('reprocessWmEnabled').checked;
+    const blindEnabled = document.getElementById('reprocessBlindEnabled').checked;
+    const compressEnabled = document.getElementById('reprocessCompressEnabled').checked;
+
+    if (!bgEnabled && !logoEnabled && !wmEnabled && !blindEnabled && !compressEnabled) {
+        alert('请至少选择一个处理操作');
+        return;
+    }
+
+    const form = new FormData();
+    form.append('source_run_id', reprocessRunId);
+    form.append('source_image_id', reprocessSourceId);
+
+    form.append('bg_enabled', bgEnabled);
+    form.append('bg_method', bgEnabled ? document.getElementById('reprocessBgMethod').value : 'none');
+    form.append('bg_model', document.getElementById('reprocessBgModel').value);
+    form.append('api_key', document.getElementById('reprocessApiKey').value);
+    form.append('bg_threads', localStorage.getItem('settingThreads') || 0);
+    form.append('bg_disable_arena', localStorage.getItem('settingDisableArena') !== 'false');
+
+    form.append('logo_enabled', logoEnabled);
+    if (logoEnabled) {
+        form.append('logo_position', document.getElementById('reprocessLogoPosition').value);
+        form.append('logo_ratio', document.getElementById('reprocessLogoRatio').value / 100);
+        form.append('logo_opacity', document.getElementById('reprocessLogoOpacity').value / 100);
+        form.append('logo_margin', parseInt(document.getElementById('reprocessLogoMargin').value) || 20);
+        form.append('logo_tile', document.getElementById('reprocessLogoTile').checked);
+    }
+
+    form.append('wm_mode', wmEnabled ? document.getElementById('reprocessWmMode').value : 'off');
+    form.append('wm_text', document.getElementById('reprocessWmText').value || '');
+    form.append('wm_text_color', document.getElementById('reprocessWmTextColor').value);
+    form.append('wm_position', document.getElementById('reprocessWmPosition').value);
+
+    form.append('wm_blind_enabled', blindEnabled);
+    form.append('wm_blind_text', document.getElementById('reprocessBlindText').value || '');
+
+    form.append('compress_enabled', compressEnabled);
+    if (compressEnabled) {
+        form.append('output_format', document.getElementById('reprocessOutputFormat').value);
+        form.append('quality', parseInt(document.getElementById('reprocessQuality').value) || 85);
+        form.append('max_file_size_kb', parseInt(document.getElementById('reprocessMaxFileSize').value) || 0);
+        form.append('max_width', parseInt(document.getElementById('reprocessMaxWidth').value) || 0);
+    } else {
+        form.append('output_format', 'PNG');
+        form.append('quality', '95');
+    }
+
+    const btn = document.querySelector('#reprocessOverlay .modal-footer .btn-primary');
+    const origText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '处理中...';
+
+    try {
+        const res = await fetch(`${API}/api/reprocess`, { method: 'POST', body: form });
+        const data = await res.json();
+        if (data.ok) {
+            appendReprocessCard(data);
+            closeReprocess();
+        } else {
+            alert('处理失败');
+        }
+    } catch (err) {
+        alert('处理失败: ' + err.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = origText;
+    }
+}
+
+function appendReprocessCard(data) {
+    const meta = uploadedImages.find(i => i.id === data.image_id);
+    const grid = document.getElementById('resultGrid');
+    const card = document.createElement('div');
+    card.className = 'result-card';
+    card.id = `result-reprocess-${Date.now()}`;
+    card.dataset.runId = data.run_id;
+    card.dataset.imageId = data.image_id;
+    const reprocessFeatures = collectReprocessFeatures();
+    card.dataset.features = reprocessFeatures.join(',');
+    card.innerHTML = `
+        <div class="preview-row">
+            <div class="before">
+                <img src="${API}/api/result-thumbnail/${data.run_id}/${data.image_id}" onerror="this.style.display='none'">
+                <span class="label">继续处理</span>
+            </div>
+            <div class="after">
+                <img src="${API}${data.thumbnail_url}?t=${Date.now()}" onerror="this.style.display='none'">
+                <span class="label">处理后</span>
+            </div>
+        </div>
+        <div class="meta">
+            <span class="filename" title="${data.filename}">${data.filename.length > 10 ? data.filename.slice(0,10)+'...' : data.filename}</span>
+            ${data.finished_at ? `<span class="time">${data.finished_at}</span>` : ''}
+            <span class="size">${(data.output_size / 1024 / 1024).toFixed(2)} MB</span>
+        </div>
+        <div class="actions">
+            <a class="btn btn-primary btn-sm" href="${API}${data.output_url}" download>下载</a>
+            <button class="btn btn-outline btn-sm" onclick="showPreview('${data.image_id}', '${API}${data.output_url}', '${data.filename}')">预览</button>
+            <button class="btn btn-outline btn-sm" onclick="openReprocess('${data.run_id}', '${data.image_id}', '${card.dataset.features}')">继续处理</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteResult('${card.id}')">删除</button>
+        </div>
+    `;
+    grid.appendChild(card);
 }
 
 function clearAll() {
@@ -436,19 +801,23 @@ async function deleteResult(cardId) {
     const card = document.getElementById(cardId);
     if (!card) return;
     card.remove();
-    // 解析卡片 ID: result-{run_id}-{image_id} 或 result-{image_id}-edit-{ts} 或 result-{image_id}
-    let imageId = '', runId = '';
-    if (cardId.includes('-edit-')) {
-        // 编辑结果: result-{image_id}-edit-{ts}
-        imageId = cardId.replace('result-', '').split('-edit-')[0];
-    } else {
-        // 新格式: result-{run_id}-{image_id}
-        const parts = cardId.replace('result-', '').split('-');
-        if (parts.length >= 2) {
-            runId = parts[0];
-            imageId = parts.slice(1).join('-');
+    // 优先使用 data 属性（reprocess/编辑卡片），否则解析卡片 ID
+    let imageId = card.dataset.imageId || '';
+    let runId = card.dataset.runId || '';
+    if (!imageId) {
+        // 解析卡片 ID: result-{run_id}-{image_id} 或 result-{image_id}-edit-{ts} 或 result-{image_id}
+        if (cardId.includes('-edit-')) {
+            // 编辑结果: result-{image_id}-edit-{ts}
+            imageId = cardId.replace('result-', '').split('-edit-')[0];
         } else {
-            imageId = parts[0];
+            // 新格式: result-{run_id}-{image_id}
+            const parts = cardId.replace('result-', '').split('-');
+            if (parts.length >= 2) {
+                runId = parts[0];
+                imageId = parts.slice(1).join('-');
+            } else {
+                imageId = parts[0];
+            }
         }
     }
     if (imageId) {
@@ -795,6 +1164,8 @@ async function saveMask() {
             const newCard = document.createElement('div');
             newCard.className = 'result-card';
             newCard.id = `result-${editorImageId}-edit-${Date.now()}`;
+            newCard.dataset.imageId = editorImageId;
+            newCard.dataset.features = collectFeatures().join(',');
             newCard.innerHTML = `
                 <div class="preview-row">
                     <div class="before">
@@ -830,7 +1201,19 @@ async function saveMask() {
 // ─── 预览弹窗 ───
 
 function showPreview(imageId, processedSrc, filename) {
-    document.getElementById('previewOriginal').src = `${API}/api/original/${imageId}`;
+    const origImg = document.getElementById('previewOriginal');
+    origImg.src = `${API}/api/original/${imageId}`;
+    origImg.onerror = function() {
+        this.src = ''; // 清除无效地址，避免显示 broken icon
+        this.style.display = 'none';
+        const label = this.nextElementSibling;
+        if (label) label.style.display = 'none';
+    };
+    origImg.onload = function() {
+        this.style.display = '';
+        const label = this.nextElementSibling;
+        if (label) label.style.display = '';
+    };
     document.getElementById('previewProcessed').src = processedSrc;
     const dlBtn = document.getElementById('previewDownloadBtn');
     dlBtn.href = processedSrc;
@@ -846,14 +1229,53 @@ function closePreview() {
 
 // ─── Settings Modal ───
 
+function handleSettingLogoUpload(files) {
+    if (!files.length) return;
+    const formData = new FormData();
+    formData.append('file', files[0]);
+
+    fetch(`${API}/api/config/default-logo-image`, { method: 'POST', body: formData })
+        .then(r => r.json())
+        .then(data => {
+            if (data.ok) {
+                document.getElementById('settingLogoPreview').innerHTML = `<img src="${API}/api/logo-default?v=${Date.now()}">`;
+                updateLogoPreview();
+            }
+        })
+        .catch(() => {});
+}
+
 function openSettings() {
     document.getElementById('settingThreads').value = localStorage.getItem('settingThreads') || 0;
     document.getElementById('settingDisableArena').checked = localStorage.getItem('settingDisableArena') !== 'false';
+    // 当前CPU线程数
+    const cores = navigator.hardwareConcurrency || '未知';
+    document.getElementById('currentCpuCores').textContent = `当前CPU线程数: ${cores}`;
+    const recommended = Math.max(1, (navigator.hardwareConcurrency || 4) - 2);
+    document.getElementById('recommendedThreads').textContent = `推荐数量：${recommended}（逻辑线程数 - 2）`;
+    // 加载默认 Logo 配置
+    document.getElementById('settingLogoPosition').value = defaultLogoConfig.position;
+    document.getElementById('settingLogoRatio').value = Math.round(defaultLogoConfig.ratio * 100);
+    document.getElementById('settingLogoRatioVal').textContent = Math.round(defaultLogoConfig.ratio * 100) + '%';
+    document.getElementById('settingLogoOpacity').value = Math.round(defaultLogoConfig.opacity * 100);
+    document.getElementById('settingLogoOpacityVal').textContent = Math.round(defaultLogoConfig.opacity * 100) + '%';
+    document.getElementById('settingLogoMargin').value = defaultLogoConfig.margin || 20;
+    document.getElementById('settingLogoMarginVal').textContent = (defaultLogoConfig.margin || 20) + 'px';
+    document.getElementById('settingLogoPreview').innerHTML = `<img src="${API}/api/logo-default?v=${Date.now()}">`;
+    document.getElementById('bgSettingsContent').parentElement.classList.add('open');
+    document.getElementById('logoSettingsContent').parentElement.classList.add('open');
     document.getElementById('settingsOverlay').classList.remove('hidden');
 }
 
 function closeSettings() {
     document.getElementById('settingsOverlay').classList.add('hidden');
+}
+
+function toggleSettingsSection(id) {
+    const content = document.getElementById(id + 'Content');
+    if (content) {
+        content.parentElement.classList.toggle('open');
+    }
 }
 
 function saveSettings() {
@@ -866,5 +1288,26 @@ function saveSettings() {
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: new URLSearchParams({threads, disable_arena: disableArena}),
     });
+
+    // 保存默认 Logo 配置
+    const logoPosition = document.getElementById('settingLogoPosition').value;
+    const logoRatio = document.getElementById('settingLogoRatio').value / 100;
+    const logoOpacity = document.getElementById('settingLogoOpacity').value / 100;
+    const logoMargin = parseInt(document.getElementById('settingLogoMargin').value) || 20;
+    localStorage.setItem('settingLogoMargin', logoMargin);
+    fetch(`${API}/api/config/default-logo`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: new URLSearchParams({
+            position: logoPosition,
+            ratio: logoRatio,
+            opacity: logoOpacity,
+            margin: logoMargin,
+        }),
+    }).then(res => res.json()).then(data => {
+        defaultLogoConfig = data;
+        updateLogoPreview();
+    });
+
     closeSettings();
 }

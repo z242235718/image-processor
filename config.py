@@ -19,7 +19,13 @@ CONCURRENT_PROCESS_LIMIT = 4
 CLEANUP_AGE_HOURS = 24
 
 # remove.bg API Key (用于云端抠图)
-REMBG_API_KEY = ""
+REMBG_API_KEY = "test123"
+
+# 默认 Logo 配置
+DEFAULT_LOGO_POSITION = "left-top"
+DEFAULT_LOGO_RATIO = 0.2
+DEFAULT_LOGO_OPACITY = 0.8
+DEFAULT_LOGO_MARGIN = 20
 
 # 文件签名 (magic bytes) 用于验证上传文件类型
 FILE_SIGNATURES = {

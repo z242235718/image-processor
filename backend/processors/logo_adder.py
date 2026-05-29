@@ -68,6 +68,14 @@ def _create_text_watermark(text: str, color: str = "#000000", font_size: int = 3
     return text_img
 
 
+def _crop_transparent(logo: Image.Image) -> Image.Image:
+    """裁剪 Logo 自身的透明边框，使 margin 从可见内容算起"""
+    bbox = logo.getbbox()
+    if bbox:
+        return logo.crop(bbox)
+    return logo
+
+
 def add_logo(
     image: Image.Image,
     logo: Image.Image,
@@ -80,6 +88,7 @@ def add_logo(
     """在图片上添加 Logo 水印"""
     image = image.convert("RGBA")
     logo = logo.convert("RGBA")
+    logo = _crop_transparent(logo)
 
     # 按比例缩放 Logo
     target_logo_width = int(image.width * logo_ratio)

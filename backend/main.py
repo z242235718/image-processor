@@ -20,7 +20,7 @@ from config import (
 )
 from backend.models import ProcessResult, TaskStatus
 from backend.task_manager import task_manager
-from backend.file_manager import save_uploaded_file, delete_image_files, delete_result_files, get_output_path, periodic_cleanup
+from backend.file_manager import save_uploaded_file, delete_result_files, get_output_path, periodic_cleanup
 from backend.utils.image_utils import generate_thumbnail
 from backend.processors.bg_remover import remove_background
 from backend.processors.logo_adder import add_logo
@@ -102,7 +102,7 @@ async def delete_image(image_id: str):
     if image_id not in image_store:
         raise HTTPException(status_code=404, detail="图片不存在")
     image_store.pop(image_id)
-    delete_image_files(image_id)
+    # 仅移除内存记录，不删除源文件，避免已存在的结果卡片预览失效
     return {"ok": True}
 
 
@@ -114,6 +114,15 @@ async def delete_result(image_id: str, run_id: str = Query("")):
 
 
 # ─── 缩略图 & 原图 ───
+
+@app.get("/api/logo-default")
+async def get_default_logo():
+    """获取默认 Logo 图片"""
+    logo_path = ASSETS_DIR / "logo.png"
+    if logo_path.exists():
+        return FileResponse(logo_path, media_type="image/png")
+    raise HTTPException(status_code=404, detail="默认Logo不存在")
+
 
 @app.get("/api/thumbnail/{image_id}")
 async def get_thumbnail(image_id: str):
@@ -160,6 +169,7 @@ async def process_images(
     logo_position: str = Form("right-bottom"),
     logo_ratio: float = Form(0.15),
     logo_opacity: float = Form(0.8),
+    logo_margin: int = Form(20),
     logo_tile: bool = Form(False),
     logo_file_id: Optional[str] = Form(None),
     wm_mode: str = Form("off"),
@@ -192,6 +202,7 @@ async def process_images(
         "logo_position": logo_position,
         "logo_ratio": logo_ratio,
         "logo_opacity": logo_opacity,
+        "logo_margin": logo_margin,
         "logo_tile": logo_tile,
         "logo_file_id": logo_file_id,
         "wm_mode": wm_mode,
@@ -241,6 +252,8 @@ async def _batch_process(batch_id: str, image_ids: List[str], config: dict, logo
 
                 # 1. 抠图
                 if config["bg_method"] != "none":
+                    # 根据设置控制 ONNX 内存预分配
+                    os.environ["ORT_DISABLE_CPU_MEM_ARENA"] = "1" if config["bg_disable_arena"] else "0"
                     img = await asyncio.to_thread(
                         remove_background, img, config["bg_method"], config["api_key"],
                         config["bg_model"], config["bg_threads"], config["bg_disable_arena"]
@@ -256,6 +269,7 @@ async def _batch_process(batch_id: str, image_ids: List[str], config: dict, logo
                         config["logo_position"],
                         config["logo_ratio"],
                         config["logo_opacity"],
+                        margin=config["logo_margin"],
                         tile=config["logo_tile"],
                     )
 
@@ -423,37 +437,135 @@ async def get_result_thumbnail_run(run_id: str, image_id: str):
     raise HTTPException(status_code=404, detail="结果缩略图不存在")
 
 
-@app.get("/api/download-all")
-async def download_all(batch_id: str = Query("")):
+@app.post("/api/download-all")
+async def download_all(data: dict):
+    """打包当前界面可见的处理结果"""
+    items = data.get("items", [])
+    if not items:
+        raise HTTPException(status_code=400, detail="没有可下载的处理结果")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in OUTPUT_DIR.iterdir():
-            if batch_id:
-                if f.name.endswith(f"_{batch_id}_processed.jpg") or \
-                   f.name.endswith(f"_{batch_id}_processed.png") or \
-                   f.name.endswith(f"_{batch_id}_processed.webp"):
-                    zf.write(f, f.name)
-            else:
-                if f.name.endswith(("_processed.jpg", "_processed.png", "_processed.webp")):
-                    zf.write(f, f.name)
+        for item in items:
+            run_id = item.get("run_id", "")
+            image_id = item.get("image_id", "")
+            for ext in [".jpg", ".png", ".webp"]:
+                path = get_output_path(image_id, ext, run_id=run_id)
+                if path.exists():
+                    zf.write(path, path.name)
+                    break
     buf.seek(0)
-    count = 0
-    for f in OUTPUT_DIR.iterdir():
-        if batch_id:
-            if f.name.endswith(f"_{batch_id}_processed.jpg") or \
-               f.name.endswith(f"_{batch_id}_processed.png") or \
-               f.name.endswith(f"_{batch_id}_processed.webp"):
-                count += 1
-        else:
-            if "_processed" in f.name:
-                count += 1
-    if count == 0:
-        raise HTTPException(status_code=404, detail="没有可下载的处理结果")
     return StreamingResponse(
         buf,
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=processed_images.zip"},
     )
+
+
+# ─── 继续处理 ───
+
+@app.post("/api/reprocess")
+async def reprocess_image(
+    source_run_id: str = Form(...),
+    source_image_id: str = Form(...),
+    # 去除背景
+    bg_enabled: bool = Form(False),
+    bg_method: str = Form("local"),
+    bg_model: str = Form("rmbg-1.4"),
+    api_key: str = Form(""),
+    bg_threads: int = Form(0),
+    bg_disable_arena: bool = Form(True),
+    # Logo
+    logo_enabled: bool = Form(False),
+    logo_position: str = Form("right-bottom"),
+    logo_ratio: float = Form(0.15),
+    logo_opacity: float = Form(0.8),
+    logo_margin: int = Form(20),
+    logo_tile: bool = Form(False),
+    # 显式水印
+    wm_mode: str = Form("off"),
+    wm_text: Optional[str] = Form(None),
+    wm_text_color: str = Form("#FFFFFF"),
+    wm_position: str = Form("right-bottom"),
+    # 盲水印
+    wm_blind_enabled: bool = Form(False),
+    wm_blind_text: Optional[str] = Form(None),
+    # 压缩
+    compress_enabled: bool = Form(True),
+    output_format: str = Form("JPEG"),
+    quality: int = Form(85),
+    max_file_size_kb: int = Form(0),
+    max_width: int = Form(0),
+):
+    """对已处理结果继续处理（抠图/Logo/水印/盲水印/压缩）"""
+    # 加载已处理的结果文件
+    img = None
+    for ext in [".jpg", ".png", ".webp"]:
+        path = get_output_path(source_image_id, ext, run_id=source_run_id)
+        if path.exists():
+            img = Image.open(path)
+            break
+    if img is None:
+        raise HTTPException(status_code=404, detail="源图片不存在")
+
+    img = img.convert("RGBA")
+
+    # 1. 抠图
+    if bg_enabled:
+        os.environ["ORT_DISABLE_CPU_MEM_ARENA"] = "1" if bg_disable_arena else "0"
+        img = remove_background(img, bg_method, api_key, bg_model, bg_threads, bg_disable_arena)
+        cutout_path = TEMP_DIR / f"{source_image_id}_cutout.png"
+        await asyncio.to_thread(img.save, str(cutout_path), "PNG")
+
+    # 2. Logo
+    if logo_enabled:
+        logo_path = ASSETS_DIR / "logo.png"
+        if logo_path.exists():
+            logo_img = Image.open(logo_path).convert("RGBA")
+            from backend.processors.logo_adder import add_logo
+            img = add_logo(img, logo_img, logo_position, logo_ratio, logo_opacity, margin=logo_margin, tile=logo_tile)
+
+    # 3. 显式水印
+    if wm_mode == "sparse" and wm_text:
+        img = add_text_watermark_sparse(img, wm_text, wm_position, 0.04, 0.3, wm_text_color)
+    elif wm_mode == "dense" and wm_text:
+        img = add_text_watermark_dense(img, wm_text, wm_position, 0.12, 0.6, wm_text_color)
+
+    # 4. 盲水印
+    if wm_blind_enabled and wm_blind_text:
+        img = add_blind_watermark(img, wm_blind_text)
+
+    # 5. 压缩
+    if compress_enabled:
+        data = compress_image(img, output_format, quality, max_file_size_kb, max_width)
+    else:
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        data = buf.getvalue()
+
+    # 保存新结果
+    new_run_id = f"reprocess-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+    ext_map = {"JPEG": ".jpg", "JPG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
+    ext = ext_map.get(output_format.upper(), ".jpg")
+    out_path = get_output_path(source_image_id, ext, run_id=new_run_id)
+    with open(out_path, "wb") as f:
+        f.write(data)
+
+    # 结果缩略图
+    out_img = Image.open(out_path)
+    thumb_data = generate_thumbnail(out_img)
+    thumb_path = TEMP_DIR / f"{source_image_id}_{new_run_id}_result_thumb.png"
+    with open(thumb_path, "wb") as f:
+        f.write(thumb_data)
+
+    return {
+        "ok": True,
+        "run_id": new_run_id,
+        "image_id": source_image_id,
+        "output_url": f"/api/download/{new_run_id}/{source_image_id}",
+        "thumbnail_url": f"/api/result-thumbnail/{new_run_id}/{source_image_id}",
+        "output_size": len(data),
+        "filename": Path(out_path).name,
+    }
 
 
 # ─── 手动编辑蒙版 ───
@@ -466,6 +578,7 @@ async def edit_mask(
     logo_position: str = Form("right-bottom"),
     logo_ratio: float = Form(0.15),
     logo_opacity: float = Form(0.8),
+    logo_margin: int = Form(20),
     logo_tile: bool = Form(False),
     logo_file_id: Optional[str] = Form(None),
     wm_mode: str = Form("off"),
@@ -516,7 +629,7 @@ async def edit_mask(
             if logo_img:
                 result_img = add_logo(
                     result_img, logo_img, logo_position,
-                    logo_ratio, logo_opacity, tile=logo_tile,
+                    logo_ratio, logo_opacity, margin=logo_margin, tile=logo_tile,
                 )
 
         # 显式水印
@@ -560,7 +673,6 @@ async def edit_mask(
             "output_size": len(data),
             "output_url": f"/api/download/{edit_run_id}/{image_id}",
             "thumbnail_url": f"/api/result-thumbnail/{edit_run_id}/{image_id}",
-            "thumbnail_url": f"/api/result-thumbnail/{image_id}",
         }
 
     except Exception as e:
@@ -611,7 +723,7 @@ async def get_apikey():
 async def update_apikey(api_key: str = Form(...)):
     """更新 API Key 到配置文件"""
     config_path = Path(__file__).resolve().parent.parent / "config.py"
-    content = config_path.read_text()
+    content = config_path.read_text(encoding="utf-8")
     lines = content.split('\n')
     key_line_found = False
     new_lines = []
@@ -623,5 +735,61 @@ async def update_apikey(api_key: str = Form(...)):
             new_lines.append(line)
     if not key_line_found:
         new_lines.append(f'\nREMBG_API_KEY = "{api_key}"')
-    config_path.write_text('\n'.join(new_lines))
+    config_path.write_text('\n'.join(new_lines), encoding="utf-8")
     return {"ok": True, "api_key": api_key}
+
+
+# ─── 默认 Logo 配置管理 ───
+
+@app.get("/api/config/default-logo")
+async def get_default_logo_config():
+    """获取默认 Logo 配置"""
+    from config import DEFAULT_LOGO_POSITION, DEFAULT_LOGO_RATIO, DEFAULT_LOGO_OPACITY, DEFAULT_LOGO_MARGIN
+    return {
+        "position": DEFAULT_LOGO_POSITION,
+        "ratio": DEFAULT_LOGO_RATIO,
+        "opacity": DEFAULT_LOGO_OPACITY,
+        "margin": DEFAULT_LOGO_MARGIN,
+    }
+
+
+@app.post("/api/config/default-logo")
+async def update_default_logo_config(
+    position: str = Form("right-bottom"),
+    ratio: float = Form(0.15),
+    opacity: float = Form(0.8),
+    margin: int = Form(20),
+):
+    """更新默认 Logo 配置到配置文件"""
+    config_path = Path(__file__).resolve().parent.parent / "config.py"
+    content = config_path.read_text(encoding="utf-8")
+    lines = content.split('\n')
+    new_lines = []
+    for line in lines:
+        if line.strip().startswith('DEFAULT_LOGO_POSITION'):
+            new_lines.append(f'DEFAULT_LOGO_POSITION = "{position}"')
+        elif line.strip().startswith('DEFAULT_LOGO_RATIO'):
+            new_lines.append(f'DEFAULT_LOGO_RATIO = {ratio}')
+        elif line.strip().startswith('DEFAULT_LOGO_OPACITY'):
+            new_lines.append(f'DEFAULT_LOGO_OPACITY = {opacity}')
+        elif line.strip().startswith('DEFAULT_LOGO_MARGIN'):
+            new_lines.append(f'DEFAULT_LOGO_MARGIN = {margin}')
+        else:
+            new_lines.append(line)
+    config_path.write_text('\n'.join(new_lines), encoding="utf-8")
+    return {"ok": True, "position": position, "ratio": ratio, "opacity": opacity, "margin": margin}
+
+
+@app.post("/api/config/default-logo-image")
+async def upload_default_logo_image(file: UploadFile = File(...)):
+    """上传新的默认 Logo 图片"""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="无效文件")
+    try:
+        content = await file.read()
+        logo_path = ASSETS_DIR / "logo.png"
+        with open(logo_path, "wb") as f:
+            f.write(content)
+        return {"ok": True, "thumbnail_url": "/api/logo-default"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

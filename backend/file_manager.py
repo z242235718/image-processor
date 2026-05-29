@@ -45,14 +45,21 @@ def save_uploaded_file(content: bytes, original_filename: str) -> dict:
 
 
 def delete_image_files(image_id: str):
-    """删除图片关联的所有文件"""
-    for dir_path in [INPUT_DIR, OUTPUT_DIR, TEMP_DIR]:
-        for f in dir_path.iterdir():
-            if f.name.startswith(image_id):
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
+    """删除原始上传文件（保留已处理的结果文件）"""
+    # 删除原始输入文件
+    for f in INPUT_DIR.iterdir():
+        if f.name.startswith(image_id):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    # 清理原始缩略图和中间文件，但保留结果缩略图
+    for f in TEMP_DIR.iterdir():
+        if f.name.startswith(image_id) and not f.name.endswith("_result_thumb.png"):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
 
 def delete_result_files(image_id: str, run_id: str = ""):
