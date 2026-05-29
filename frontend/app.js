@@ -280,7 +280,7 @@ async function startProcess() {
         const data = await res.json();
         currentBatchId = data.batch_id;
         document.getElementById('progressPanel').classList.remove('hidden');
-        initResultCards();
+        initResultCards(data.batch_id);
         connectWebSocket(data.batch_id);
     } catch (err) {
         alert('启动处理失败: ' + err.message);
@@ -289,13 +289,14 @@ async function startProcess() {
     }
 }
 
-function initResultCards() {
+function initResultCards(batchId) {
     const grid = document.getElementById('resultGrid');
     uploadedImages.forEach(img => {
-        if (document.getElementById(`result-${img.id}`)) return;
+        const cardId = `result-${batchId}-${img.id}`;
+        if (document.getElementById(cardId)) return;
         const card = document.createElement('div');
         card.className = 'result-card';
-        card.id = `result-${img.id}`;
+        card.id = cardId;
         card.innerHTML = `
             <div class="status-processing"><div class="spinner"></div><div class="text">处理中...</div></div>
             <div class="meta"><span class="filename">${img.filename}</span></div>
@@ -340,19 +341,26 @@ function updateProgress(data) {
     document.getElementById('progressText').textContent =
         `已完成 ${data.done}/${data.total}` + (data.failed > 0 ? `，失败 ${data.failed}` : '');
 
+    // 处理单条结果更新（WebSocket 广播）
     if (data.result) updateResultCard(data.result, pct);
+    // 处理批量结果更新（初始 WS 消息或轮询降级）
+    if (data.results) data.results.forEach(r => updateResultCard(r, pct));
 
+    // 显示进度条区域（只要还没完成就显示）
     if (data.status === 'done') {
         document.getElementById('processBtn').disabled = false;
         document.getElementById('processBtn').textContent = '开始处理';
         document.getElementById('downloadAllBtn').classList.remove('hidden');
-    } else if (data.status === 'processing' || data.status === 'pending') {
+        document.getElementById('progressSection').classList.remove('hidden');
+    } else {
         document.getElementById('progressSection').classList.remove('hidden');
     }
 }
 
 function updateResultCard(result, itemPct) {
-    const card = document.getElementById(`result-${result.id}`);
+    // 优先用 run_id + id 查找（每批处理独立卡片），否则回退到旧格式
+    const cardId = result.run_id ? `result-${result.run_id}-${result.id}` : `result-${result.id}`;
+    const card = document.getElementById(cardId) || document.getElementById(`result-${result.id}`);
     if (!card) return;
 
     if (result.status === 'processing') {
@@ -426,15 +434,27 @@ function clearAll() {
 async function deleteResult(cardId) {
     if (!confirm('确定要删除这张处理结果吗？')) return;
     const card = document.getElementById(cardId);
-    if (!card) {
-        const all = document.querySelectorAll('.result-card');
-        return;
-    }
+    if (!card) return;
     card.remove();
-    const imageId = cardId.replace('result-', '').split('-edit-')[0];
+    // 解析卡片 ID: result-{run_id}-{image_id} 或 result-{image_id}-edit-{ts} 或 result-{image_id}
+    let imageId = '', runId = '';
+    if (cardId.includes('-edit-')) {
+        // 编辑结果: result-{image_id}-edit-{ts}
+        imageId = cardId.replace('result-', '').split('-edit-')[0];
+    } else {
+        // 新格式: result-{run_id}-{image_id}
+        const parts = cardId.replace('result-', '').split('-');
+        if (parts.length >= 2) {
+            runId = parts[0];
+            imageId = parts.slice(1).join('-');
+        } else {
+            imageId = parts[0];
+        }
+    }
     if (imageId) {
         try {
-            await fetch(`${API}/api/results/${imageId}`, { method: 'DELETE' });
+            const url = runId ? `${API}/api/results/${imageId}?run_id=${runId}` : `${API}/api/results/${imageId}`;
+            await fetch(url, { method: 'DELETE' });
         } catch (e) {}
     }
 }

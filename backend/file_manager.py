@@ -2,7 +2,7 @@ import os
 import uuid
 import asyncio
 from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageOps
 
 from config import INPUT_DIR, OUTPUT_DIR, TEMP_DIR, CLEANUP_AGE_HOURS
 from backend.utils.image_utils import generate_thumbnail
@@ -24,8 +24,9 @@ def save_uploaded_file(content: bytes, original_filename: str) -> dict:
     with open(save_path, "wb") as f:
         f.write(content)
 
-    # 获取图片尺寸和生成缩略图
+    # 获取图片尺寸和生成缩略图（自动修正 EXIF 方向）
     img = Image.open(save_path)
+    img = ImageOps.exif_transpose(img) or img
     width, height = img.size
     thumb_data = generate_thumbnail(img)
     thumb_path = TEMP_DIR / f"{image_id}_thumb.png"
@@ -54,18 +55,27 @@ def delete_image_files(image_id: str):
                     pass
 
 
-def delete_result_files(image_id: str):
+def delete_result_files(image_id: str, run_id: str = ""):
     """删除图片关联的处理结果文件（保留原始上传文件）"""
     for dir_path in [OUTPUT_DIR, TEMP_DIR]:
         for f in dir_path.iterdir():
-            if f.name.startswith(image_id):
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
+            if run_id:
+                if f.name.startswith(f"{image_id}_{run_id}"):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+            else:
+                if f.name.startswith(image_id):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
 
 
-def get_output_path(image_id: str, ext: str) -> Path:
+def get_output_path(image_id: str, ext: str, run_id: str = "") -> Path:
+    if run_id:
+        return OUTPUT_DIR / f"{image_id}_{run_id}_processed{ext}"
     return OUTPUT_DIR / f"{image_id}_processed{ext}"
 
 

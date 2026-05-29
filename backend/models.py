@@ -50,6 +50,7 @@ class ImageMeta(BaseModel):
 class ProcessResult(BaseModel):
     id: str
     filename: str
+    run_id: str = ""
     output_size: int = 0
     output_url: str = ""
     thumbnail_url: str = ""

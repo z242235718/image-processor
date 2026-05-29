@@ -12,7 +12,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Form, WebSocket, W
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image
+from PIL import Image, ImageOps
 
 from config import (
     INPUT_DIR, OUTPUT_DIR, TEMP_DIR, ASSETS_DIR, FRONTEND_DIR,
@@ -107,9 +107,9 @@ async def delete_image(image_id: str):
 
 
 @app.delete("/api/results/{image_id}")
-async def delete_result(image_id: str):
+async def delete_result(image_id: str, run_id: str = Query("")):
     """只删除处理结果，保留原始上传图片"""
-    delete_result_files(image_id)
+    delete_result_files(image_id, run_id=run_id)
     return {"ok": True}
 
 
@@ -237,6 +237,7 @@ async def _batch_process(batch_id: str, image_ids: List[str], config: dict, logo
             result = ProcessResult(id=image_id, filename=meta["filename"], status="processing")
             try:
                 img = await asyncio.to_thread(Image.open, meta["path"])
+                img = await asyncio.to_thread(ImageOps.exif_transpose, img)
 
                 # 1. 抠图
                 if config["bg_method"] != "none":
@@ -299,21 +300,22 @@ async def _batch_process(batch_id: str, image_ids: List[str], config: dict, logo
                 # 保存
                 ext_map = {"JPEG": ".jpg", "JPG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
                 ext = ext_map.get(config["output_format"].upper(), ".jpg")
-                out_path = get_output_path(image_id, ext)
+                out_path = get_output_path(image_id, ext, run_id=batch_id)
                 with open(out_path, "wb") as f:
                     f.write(data)
 
                 # 生成结果缩略图
                 out_img = Image.open(out_path)
                 thumb_data = generate_thumbnail(out_img)
-                thumb_path = TEMP_DIR / f"{image_id}_result_thumb.png"
+                thumb_path = TEMP_DIR / f"{image_id}_{batch_id}_result_thumb.png"
                 with open(thumb_path, "wb") as f:
                     f.write(thumb_data)
 
                 result.status = "done"
+                result.run_id = batch_id
                 result.output_size = len(data)
-                result.output_url = f"/api/download/{image_id}"
-                result.thumbnail_url = f"/api/result-thumbnail/{image_id}"
+                result.output_url = f"/api/download/{batch_id}/{image_id}"
+                result.thumbnail_url = f"/api/result-thumbnail/{batch_id}/{image_id}"
                 result.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                 del img, out_img
@@ -342,7 +344,10 @@ async def websocket_progress(websocket: WebSocket, batch_id: str):
         await websocket.close()
         return
 
-    # 发送当前状态
+    # 先注册，避免竞态条件丢失消息
+    await task_manager.register_ws(batch_id, websocket)
+
+    # 再发送当前状态
     await websocket.send_json({
         "batch_id": batch_id,
         "total": task.total,
@@ -352,7 +357,6 @@ async def websocket_progress(websocket: WebSocket, batch_id: str):
         "results": [r.model_dump() for r in task.results],
     })
 
-    await task_manager.register_ws(batch_id, websocket)
     try:
         while True:
             data = await websocket.receive_text()
@@ -394,9 +398,26 @@ async def download_single(image_id: str):
     raise HTTPException(status_code=404, detail="文件不存在")
 
 
+@app.get("/api/download/{run_id}/{image_id}")
+async def download_single_run(run_id: str, image_id: str):
+    for ext in [".jpg", ".png", ".webp"]:
+        path = get_output_path(image_id, ext, run_id=run_id)
+        if path.exists():
+            return FileResponse(path, filename=path.name)
+    raise HTTPException(status_code=404, detail="文件不存在")
+
+
 @app.get("/api/result-thumbnail/{image_id}")
 async def get_result_thumbnail(image_id: str):
     thumb_path = TEMP_DIR / f"{image_id}_result_thumb.png"
+    if thumb_path.exists():
+        return FileResponse(thumb_path, media_type="image/png")
+    raise HTTPException(status_code=404, detail="结果缩略图不存在")
+
+
+@app.get("/api/result-thumbnail/{run_id}/{image_id}")
+async def get_result_thumbnail_run(run_id: str, image_id: str):
+    thumb_path = TEMP_DIR / f"{image_id}_{run_id}_result_thumb.png"
     if thumb_path.exists():
         return FileResponse(thumb_path, media_type="image/png")
     raise HTTPException(status_code=404, detail="结果缩略图不存在")
@@ -407,10 +428,25 @@ async def download_all(batch_id: str = Query("")):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in OUTPUT_DIR.iterdir():
-            if f.name.endswith(("_processed.jpg", "_processed.png", "_processed.webp")):
-                zf.write(f, f.name)
+            if batch_id:
+                if f.name.endswith(f"_{batch_id}_processed.jpg") or \
+                   f.name.endswith(f"_{batch_id}_processed.png") or \
+                   f.name.endswith(f"_{batch_id}_processed.webp"):
+                    zf.write(f, f.name)
+            else:
+                if f.name.endswith(("_processed.jpg", "_processed.png", "_processed.webp")):
+                    zf.write(f, f.name)
     buf.seek(0)
-    count = sum(1 for f in OUTPUT_DIR.iterdir() if "_processed" in f.name)
+    count = 0
+    for f in OUTPUT_DIR.iterdir():
+        if batch_id:
+            if f.name.endswith(f"_{batch_id}_processed.jpg") or \
+               f.name.endswith(f"_{batch_id}_processed.png") or \
+               f.name.endswith(f"_{batch_id}_processed.webp"):
+                count += 1
+        else:
+            if "_processed" in f.name:
+                count += 1
     if count == 0:
         raise HTTPException(status_code=404, detail="没有可下载的处理结果")
     return StreamingResponse(
@@ -450,8 +486,9 @@ async def edit_mask(
         raise HTTPException(status_code=404, detail="图片不存在")
 
     try:
-        # 加载原图
+        # 加载原图（自动修正 EXIF 方向）
         original = await asyncio.to_thread(Image.open, meta["path"])
+        original = await asyncio.to_thread(ImageOps.exif_transpose, original)
         original = original.convert("RGBA")
 
         # 加载蒙版 (黑色=擦除，白色=保留)
@@ -504,23 +541,25 @@ async def edit_mask(
             result_img.save(buf, format="PNG")
             data = buf.getvalue()
 
+        edit_run_id = f"edit-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
         ext_map = {"JPEG": ".jpg", "JPG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
         ext = ext_map.get(output_format.upper(), ".jpg")
-        out_path = get_output_path(image_id, ext)
+        out_path = get_output_path(image_id, ext, run_id=edit_run_id)
         with open(out_path, "wb") as f:
             f.write(data)
 
         # 更新缩略图
         out_img = Image.open(out_path)
         thumb_data = generate_thumbnail(out_img)
-        thumb_path = TEMP_DIR / f"{image_id}_result_thumb.png"
+        thumb_path = TEMP_DIR / f"{image_id}_{edit_run_id}_result_thumb.png"
         with open(thumb_path, "wb") as f:
             f.write(thumb_data)
 
         return {
             "ok": True,
             "output_size": len(data),
-            "output_url": f"/api/download/{image_id}",
+            "output_url": f"/api/download/{edit_run_id}/{image_id}",
+            "thumbnail_url": f"/api/result-thumbnail/{edit_run_id}/{image_id}",
             "thumbnail_url": f"/api/result-thumbnail/{image_id}",
         }
 
