@@ -1489,3 +1489,80 @@ body {
         flex: 1;
     }
 }
+
+/* ─── Watermark Extraction Popup ─── */
+.watermark-modal {
+    width: 90vw;
+    max-width: 480px;
+}
+
+.watermark-body {
+    padding: 24px;
+}
+
+.wm-result-item {
+    padding: 14px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.wm-result-item:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.wm-result-label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+
+.wm-result-value {
+    display: block;
+    font-size: 14px;
+    color: var(--text);
+    word-break: break-all;
+}
+
+.wm-result-value.wm-text {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--primary);
+}
+
+.wm-result-value.wm-phash {
+    font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+    font-size: 13px;
+    color: var(--text-secondary);
+    letter-spacing: 0.5px;
+}
+
+.wm-result-hint {
+    display: block;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+.wm-result-fail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 20px 0;
+}
+
+.wm-fail-text {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--danger);
+    margin-bottom: 6px;
+}
+
+.wm-fail-detail {
+    font-size: 13px;
+    color: var(--text-secondary);
+}

@@ -7,3 +7,5 @@ onnxruntime>=1.16.3
 Pillow>=10.1.0
 httpx>=0.25.2
 aiofiles>=23.2.1
+reedsolo>=1.7.0
+scipy>=1.9.0

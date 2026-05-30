@@ -328,7 +328,7 @@
                         </div>
                         <div class="feature-text">
                             <span class="feature-name">盲水印</span>
-                            <span class="feature-desc">LSB 隐写，肉眼完全不可见</span>
+                            <span class="feature-desc">DCT 鲁棒水印，抗 JPEG 压缩</span>
                         </div>
                     </div>
                     <button class="feature-expand" onclick="toggleFeature('blind')">
@@ -338,9 +338,25 @@
                 <div class="feature-params hidden" id="blindSection">
                     <div class="param-row param-row--full">
                         <div class="param-group">
-                            <label>嵌入文字（用于版权识别）</label>
+                            <label>嵌入文字（用于版权识别，建议≤32字节）</label>
                             <input type="text" id="wmBlindText" placeholder="输入版权文字，如「原创图片-张三-2026」">
                         </div>
+                    </div>
+                    <div class="param-row param-row--full">
+                        <div class="param-group">
+                            <label>水印强度: <span id="wmBlindStrengthValue">16</span></label>
+                            <input type="range" id="wmBlindStrength" min="4" max="40" value="16"
+                                oninput="document.getElementById('wmBlindStrengthValue').textContent=this.value">
+                            <div class="range-labels"><span>弱（不可见）</span><span>强（高鲁棒）</span></div>
+                        </div>
+                    </div>
+                    <div class="param-row param-row--full">
+                        <label class="checkbox-label checkbox-label--nowrap">
+                            <input type="checkbox" id="wmBlindUseMask" checked>
+                            <span class="checkbox-custom"></span>
+                            主体区域掩码（仅在产品区域嵌入，跳过白底背景）
+                        </label>
+                        <p class="param-hint" style="margin-top:4px">白底商品图强烈建议开启，从根本上消除白底上的可见伪影</p>
                     </div>
                 </div>
 
@@ -395,6 +411,27 @@
                         <div class="param-group">
                             <label>最大宽度 (px，0=不限)</label>
                             <input type="number" id="maxWidth" value="0" min="0">
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Blind Watermark Extraction -->
+            <section class="card">
+                <div class="card-header" style="cursor:pointer" onclick="this.nextElementSibling.classList.toggle('hidden')">
+                    <span class="step-badge">⚡</span>
+                    <h2>验证水印</h2>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;margin-left:auto"><polyline points="6 9 12 15 18 9"/></svg>
+                </div>
+                <div class="feature-params hidden" id="extractSection">
+                    <div class="param-row param-row--full">
+                        <div class="param-group">
+                            <label>上传图片提取盲水印</label>
+                            <div class="upload-zone" id="extractWatermarkZone" style="border:2px dashed var(--border);border-radius:8px;padding:20px;text-align:center;cursor:pointer;color:var(--text-secondary)">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:32px;height:32px;margin:0 auto 8px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                                <div>点击或拖放图片到此处<br><small style="color:var(--text-tertiary)">提取 DCT 鲁棒水印 · 结果弹窗显示</small></div>
+                            </div>
+                            <input type="file" id="extractWatermarkInput" accept="image/*" style="display:none">
                         </div>
                     </div>
                 </div>
@@ -890,6 +927,22 @@
             <div class="modal-footer">
                 <button class="btn btn-outline" onclick="closeReprocess()">取消</button>
                 <button class="btn btn-primary" onclick="startReprocess()">开始处理</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Watermark Extraction Result Modal -->
+    <div class="modal-overlay hidden" id="watermarkOverlay">
+        <div class="modal watermark-modal">
+            <div class="modal-header">
+                <h3>🔍 水印提取结果</h3>
+                <button class="modal-close" onclick="closeWatermarkPopup()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+            </div>
+            <div class="modal-body watermark-body" id="watermarkBody"></div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeWatermarkPopup()">关闭</button>
             </div>
         </div>
     </div>

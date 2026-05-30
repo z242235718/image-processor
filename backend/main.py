@@ -24,7 +24,12 @@ from backend.file_manager import save_uploaded_file, delete_result_files, get_ou
 from backend.utils.image_utils import generate_thumbnail
 from backend.processors.bg_remover import remove_background
 from backend.processors.logo_adder import add_logo
-from backend.processors.watermark import add_text_watermark, add_blind_watermark
+from backend.processors.watermark import (
+    add_text_watermark,
+    add_blind_watermark,
+    extract_blind_watermark,
+)
+from backend.utils.perceptual_hash import compute_phash, hamming_distance
 from backend.processors.compressor import compress_image
 
 
@@ -195,6 +200,8 @@ async def process_images(
     wm_dense_density: int = Form(5),
     wm_blind_enabled: bool = Form(False),
     wm_blind_text: Optional[str] = Form(None),
+    wm_blind_strength: int = Form(16),
+    wm_blind_use_mask: bool = Form(True),
     compress_enabled: bool = Form(True),
     output_format: str = Form("JPEG"),
     quality: int = Form(85),
@@ -232,6 +239,8 @@ async def process_images(
         "wm_dense_density": wm_dense_density,
         "wm_blind_enabled": wm_blind_enabled,
         "wm_blind_text": wm_blind_text,
+        "wm_blind_strength": wm_blind_strength,
+        "wm_blind_use_mask": wm_blind_use_mask,
         "compress_enabled": compress_enabled,
         "output_format": output_format,
         "quality": quality,
@@ -309,10 +318,12 @@ async def _batch_process(batch_id: str, image_ids: List[str], config: dict, logo
                         config["wm_dense_density"],
                     )
 
-                # 4. 盲水印
+                # 4. 盲水印（DCT 中频鲁棒水印，支持 JPEG 输出）
                 if config["wm_blind_enabled"] and config["wm_blind_text"]:
                     img = await asyncio.to_thread(
-                        add_blind_watermark, img, config["wm_blind_text"]
+                        add_blind_watermark, img, config["wm_blind_text"],
+                        config.get("wm_blind_strength", 16),
+                        config.get("wm_blind_use_mask", True),
                     )
 
                 # 5. 压缩
@@ -488,6 +499,72 @@ async def download_all(data: dict):
     )
 
 
+# ─── 盲水印提取 ───
+
+@app.post("/api/extract-watermark")
+async def extract_watermark(file: UploadFile = File(...)):
+    """
+    从上传的图片中提取 DCT 鲁棒盲水印
+
+    先用 DCT 中频水印提取，失败后降级到感知哈希匹配作为兜底。
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="无效文件")
+    try:
+        content = await file.read()
+        img = Image.open(io.BytesIO(content))
+
+        text = extract_blind_watermark(img)
+
+        # 同时计算感知哈希供前端对比
+        phash = compute_phash(img)
+        phash_hex = f"{phash:016x}"
+
+        is_dct = not text.startswith("[PHASH:")
+        return {
+            "ok": True,
+            "extracted_text": text,
+            "method": "dct" if is_dct else "phash",
+            "phash": phash_hex,
+            "filename": file.filename,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"水印提取失败: {str(e)}")
+
+
+@app.get("/api/extract-watermark/{run_id}/{image_id}")
+async def extract_watermark_from_result(run_id: str, image_id: str):
+    """
+    从已处理结果文件中直接提取盲水印（服务器端读取，避免客户端下载再上传）
+
+    适用于结果卡片上的"提取水印"按钮，速度远快于 POST 上传方式。
+    """
+    img = None
+    for ext in [".jpg", ".png", ".webp"]:
+        path = get_output_path(image_id, ext, run_id=run_id)
+        if path.exists():
+            img = Image.open(path)
+            break
+    if img is None:
+        raise HTTPException(status_code=404, detail="结果文件不存在，可能已被清理")
+
+    try:
+        text = extract_blind_watermark(img)
+        phash = compute_phash(img)
+        phash_hex = f"{phash:016x}"
+
+        is_dct = not text.startswith("[PHASH:")
+        return {
+            "ok": True,
+            "extracted_text": text,
+            "method": "dct" if is_dct else "phash",
+            "phash": phash_hex,
+            "filename": path.name,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"水印提取失败: {str(e)}")
+
+
 # ─── 继续处理 ───
 
 @app.post("/api/reprocess")
@@ -521,6 +598,8 @@ async def reprocess_image(
     # 盲水印
     wm_blind_enabled: bool = Form(False),
     wm_blind_text: Optional[str] = Form(None),
+    wm_blind_strength: int = Form(16),
+    wm_blind_use_mask: bool = Form(True),
     # 压缩
     compress_enabled: bool = Form(True),
     output_format: str = Form("JPEG"),
@@ -569,9 +648,9 @@ async def reprocess_image(
             wm_tile_direction, wm_mode == "dense", wm_dense_density,
         )
 
-    # 4. 盲水印
+    # 4. 盲水印（DCT 中频鲁棒水印，支持 JPEG 输出）
     if wm_blind_enabled and wm_blind_text:
-        img = add_blind_watermark(img, wm_blind_text)
+        img = add_blind_watermark(img, wm_blind_text, wm_blind_strength, wm_blind_use_mask)
 
     # 5. 压缩
     if compress_enabled:
@@ -634,6 +713,8 @@ async def edit_mask(
     wm_dense_density: int = Form(5),
     wm_blind_enabled: bool = Form(False),
     wm_blind_text: Optional[str] = Form(None),
+    wm_blind_strength: int = Form(16),
+    wm_blind_use_mask: bool = Form(True),
     compress_enabled: bool = Form(True),
     output_format: str = Form("JPEG"),
     quality: int = Form(85),
@@ -687,10 +768,9 @@ async def edit_mask(
                 wm_tile_direction, wm_mode == "dense", wm_dense_density,
             )
 
-        # 盲水印（必须用 PNG 保存，否则 LSB 数据会被 JPEG 压缩损坏）
+        # 盲水印（DCT 中频鲁棒水印，支持 JPEG 输出）
         if wm_blind_enabled and wm_blind_text:
-            result_img = add_blind_watermark(result_img, wm_blind_text)
-            output_format = "PNG"
+            result_img = add_blind_watermark(result_img, wm_blind_text, wm_blind_strength, wm_blind_use_mask)
 
         # 压缩
         if compress_enabled:

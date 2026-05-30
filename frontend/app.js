@@ -438,6 +438,8 @@ function collectConfig() {
     form.append('wm_dense_density', parseInt(document.getElementById('wmDenseDensity').value));
     form.append('wm_blind_enabled', document.getElementById('enableBlindWatermark').checked);
     form.append('wm_blind_text', document.getElementById('wmBlindText').value);
+    form.append('wm_blind_strength', parseInt(document.getElementById('wmBlindStrength').value) || 16);
+    form.append('wm_blind_use_mask', document.getElementById('wmBlindUseMask').checked);
     form.append('compress_enabled', document.getElementById('enableCompress').checked);
     if (document.getElementById('enableCompress').checked) {
         form.append('output_format', document.getElementById('outputFormat').value);
@@ -590,6 +592,7 @@ function updateResultCard(result, itemPct) {
                 <button class="btn btn-outline btn-sm" onclick="showPreview('${result.id}', '${API}${result.output_url}', '${result.filename}')">预览</button>
                 <button class="btn btn-outline btn-sm" onclick="openEditor('${result.id}')">修改</button>
                 <button class="btn btn-outline btn-sm" onclick="openReprocess('${result.run_id}', '${result.id}', '${featuresStr}')">继续处理</button>
+                <button class="btn btn-outline btn-sm" onclick="extractWatermarkFromResult('${result.run_id}', '${result.id}')">提取水印</button>
                 <button class="btn btn-danger btn-sm" onclick="deleteResult('result-${result.id}')">删除</button>
             </div>
         `;
@@ -798,6 +801,8 @@ async function startReprocess() {
 
     form.append('wm_blind_enabled', blindEnabled);
     form.append('wm_blind_text', document.getElementById('reprocessBlindText').value || '');
+    form.append('wm_blind_strength', parseInt(document.getElementById('wmBlindStrength').value) || 16);
+    form.append('wm_blind_use_mask', document.getElementById('wmBlindUseMask').checked);
 
     form.append('compress_enabled', compressEnabled);
     if (compressEnabled) {
@@ -1395,3 +1400,134 @@ function saveSettings() {
 
     closeSettings();
 }
+
+// ─── 盲水印提取 ───
+
+async function extractWatermarkFromResult(runId, imageId) {
+    try {
+        const res = await fetch(`${API}/api/extract-watermark/${runId}/${imageId}`);
+        const data = await res.json();
+        if (!data.ok) {
+            showWatermarkPopup({ ok: false, detail: data.detail || '未知错误' });
+            return;
+        }
+        showWatermarkPopup(data);
+    } catch (e) {
+        showWatermarkPopup({ ok: false, detail: e.message });
+    }
+}
+
+async function extractWatermarkFromUrl(url) {
+    try {
+        const res = await fetch(url);
+        const blob = await res.blob();
+        await extractWatermarkFromBlob(blob);
+    } catch (e) {
+        showWatermarkPopup({ ok: false, detail: e.message });
+    }
+}
+
+async function extractWatermarkFromBlob(blob) {
+    const formData = new FormData();
+    formData.append('file', blob, 'watermarked.png');
+
+    try {
+        const res = await fetch(`${API}/api/extract-watermark`, {
+            method: 'POST',
+            body: formData,
+        });
+        const data = await res.json();
+        if (!data.ok) {
+            showWatermarkPopup({ ok: false, detail: data.detail || '未知错误' });
+            return;
+        }
+        showWatermarkPopup(data);
+    } catch (e) {
+        showWatermarkPopup({ ok: false, detail: e.message });
+    }
+}
+
+function showWatermarkPopup(data) {
+    const body = document.getElementById('watermarkBody');
+    if (!body) return;
+
+    if (!data.ok) {
+        body.innerHTML = `
+            <div class="wm-result-fail">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:40px;height:40px;color:var(--danger);margin-bottom:12px"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                <div class="wm-fail-text">提取失败</div>
+                <div class="wm-fail-detail">${escapeHtml(data.detail || '未知错误')}</div>
+            </div>`;
+    } else {
+        const methodLabel = data.method === 'dct' ? 'DCT 鲁棒水印' : '感知哈希兜底';
+        const methodIcon = data.method === 'dct' ? '🔐' : '🔑';
+        const methodDesc = data.method === 'dct'
+            ? '从 DCT 中频系数中成功解码水印文字'
+            : 'DCT 水印未检测到，通过感知哈希标识图片';
+        body.innerHTML = `
+            <div class="wm-result-item">
+                <span class="wm-result-label">提取文字</span>
+                <span class="wm-result-value wm-text">${escapeHtml(data.extracted_text || '(空)')}</span>
+            </div>
+            <div class="wm-result-item">
+                <span class="wm-result-label">提取方案</span>
+                <span class="wm-result-value">${methodIcon} ${methodLabel}</span>
+                <span class="wm-result-hint">${methodDesc}</span>
+            </div>
+            <div class="wm-result-item">
+                <span class="wm-result-label">感知哈希</span>
+                <span class="wm-result-value wm-phash">${data.phash || '-'}</span>
+                <span class="wm-result-hint">64-bit DCT 感知哈希，可用于图片相似度比对</span>
+            </div>
+            ${data.filename ? `
+            <div class="wm-result-item">
+                <span class="wm-result-label">源文件</span>
+                <span class="wm-result-value">${escapeHtml(data.filename)}</span>
+            </div>` : ''}
+        `;
+    }
+
+    document.getElementById('watermarkOverlay').classList.remove('hidden');
+}
+
+function closeWatermarkPopup() {
+    document.getElementById('watermarkOverlay').classList.add('hidden');
+}
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+// 从上传文件提取水印（拖放或文件选择）
+function setupExtractWatermarkUI() {
+    const zone = document.getElementById('extractWatermarkZone');
+    const input = document.getElementById('extractWatermarkInput');
+    if (!zone || !input) return;
+
+    zone.addEventListener('click', () => input.click());
+    zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+    zone.addEventListener('drop', e => {
+        e.preventDefault();
+        zone.classList.remove('dragover');
+        if (e.dataTransfer.files.length) {
+            extractWatermarkFromBlob(e.dataTransfer.files[0]);
+        }
+    });
+    input.addEventListener('change', e => {
+        if (e.target.files.length) {
+            extractWatermarkFromBlob(e.target.files[0]);
+        }
+    });
+}
+
+// 延迟初始化提取UI
+document.addEventListener('DOMContentLoaded', setupExtractWatermarkUI);
+setTimeout(setupExtractWatermarkUI, 1000);
+
+// 点击水印弹窗遮罩关闭
+document.getElementById('watermarkOverlay').addEventListener('click', function(e) {
+    if (e.target === this) closeWatermarkPopup();
+});

@@ -166,89 +166,73 @@ def add_text_watermark(
     return Image.alpha_composite(image, layer)
 
 
-# ─── 盲水印 (LSB) ───
+# ─── 盲水印 (DCT 中频鲁棒水印 + ECC + 重复嵌入 + 同步模板) ───
 
-_SECRET = [7, 2, 4, 1, 5, 3, 0, 6]
+"""
+使用 DCT 中频系数差分调制的鲁棒盲水印，替代旧的 LSB 方案。
+特性：
+  - 8x8 分块 DCT 变换，中频系数对嵌入
+  - Reed-Solomon 前向纠错 (ECC)
+  - 重复嵌入 + 多数投票
+  - m-sequence 同步模板（抗裁剪、缩放检测）
+  - 多尺度盲搜（抗缩放攻击）
+  - 感知哈希兜底降级
+"""
 
-
-def _scramble_bit(bit: int, idx: int) -> int:
-    return bit ^ (_SECRET[idx % len(_SECRET)] & 1)
-
-
-def _bits_to_text(bits: list) -> str:
-    chars = []
-    for i in range(0, len(bits), 8):
-        byte_bits = bits[i : i + 8]
-        if len(byte_bits) < 8:
-            break
-        byte = sum(bits[j] << j for j in range(8))
-        try:
-            chars.append(chr(byte))
-        except (ValueError, OverflowError):
-            break
-    return "".join(chars)
+from backend.processors.dct_watermark import embed_watermark, extract_watermark
+from backend.utils.perceptual_hash import compute_phash_hex, hamming_distance
 
 
-def add_blind_watermark(image: Image.Image, text: str) -> Image.Image:
-    """将 text 的 UTF-8 二进制嵌入图片 RGB 最低位 (LSB)"""
-    image = image.convert("RGBA")
-    arr = np.array(image, dtype=np.uint8)
+def add_blind_watermark(
+    image: Image.Image,
+    text: str,
+    strength: int = 16,
+    use_subject_mask: bool = True,
+) -> Image.Image:
+    """
+    鲁棒盲水印嵌入（主体区域自适应方案）
 
-    data_bits = []
-    for c in text.encode("utf-8"):
-        for i in range(8):
-            data_bits.append((c >> i) & 1)
+    新方案针对白底商品图：
+      - 主体掩膜检测 → 仅在产品区域内嵌入
+      - 确定性块乱序 → 分散冗余 → 抗裁剪
+      - 自适应弱强度 → 平滑区域接近不可见
+      - ECC + 重复嵌入 + 多数投票
 
-    h, w = arr.shape[:2]
-    total_bits = h * w * 3
-    required = len(data_bits)
+    Args:
+        image: 输入图片
+        text: 待嵌入文本（建议 ≤ 32 字节）
+        strength: 嵌入强度 (4-40)，默认 12。白底商品图建议 8-16
+        use_subject_mask: 是否启用主体掩膜（跳过白底背景）
+    Returns:
+        含水印的 PIL Image (RGBA)
+    """
+    from backend.processors.dct_watermark import DCTWatermark, DCTWatermarkConfig
 
-    if required > total_bits:
-        raise ValueError(f"图片太小，无法嵌入 {required} bits（最多 {total_bits}）")
-
-    bit_idx = 0
-    flat = arr.flatten()
-    for i in range(len(flat)):
-        if bit_idx >= required:
-            break
-        channel = i % 3
-        if channel == 3:
-            continue
-        orig = flat[i]
-        bit = data_bits[bit_idx]
-        bit = _scramble_bit(bit, bit_idx)
-        new_val = (orig & 0xFE) | bit
-        flat[i] = new_val
-        bit_idx += 1
-
-    arr = flat.reshape(h, w, 4)
-    return Image.fromarray(arr, "RGBA")
+    config = DCTWatermarkConfig(
+        strength=strength,
+        use_subject_mask=use_subject_mask,
+    )
+    watermaker = DCTWatermark(config)
+    return watermaker.embed(image, text, strength)
 
 
 def extract_blind_watermark(image: Image.Image) -> str:
-    """从 LSB 中提取盲水印文本"""
-    arr = np.array(image.convert("RGBA"), dtype=np.uint8)
-    flat = arr.flatten()
+    """
+    提取鲁棒盲水印
 
-    all_bits = []
-    for i in range(len(flat)):
-        channel = i % 3
-        if channel == 3:
-            continue
-        all_bits.append(flat[i] & 1)
+    优先 DCT 提取，若失败则降级到感知哈希匹配作为兜底。
 
-    descrambled = [_scramble_bit(b, i) for i, b in enumerate(all_bits)]
+    Returns:
+        提取的文本（成功）或感知哈希标识（兜底）或空字符串（完全失败）
+    """
+    # 1. 尝试 DCT 水印提取
+    text = extract_watermark(image)
+    if text:
+        return text
 
-    null_pos = None
-    for i in range(0, len(descrambled), 8):
-        if i + 8 > len(descrambled):
-            break
-        byte = sum(descrambled[i + j] << j for j in range(8))
-        if byte == 0:
-            null_pos = i
-            break
-
-    if null_pos:
-        descrambled = descrambled[:null_pos]
-
-    return _bits_to_text(descrambled)
+    # 2. DCT 提取失败 → 感知哈希兜底
+    try:
+        phash_hex = compute_phash_hex(image)
+        return f"[PHASH:{phash_hex}]"
+    except Exception:
+        return ""
