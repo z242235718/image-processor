@@ -112,7 +112,10 @@ def add_logo(
         x, y = _calculate_position(image.width, image.height, target_logo_width, target_logo_height, position, margin)
         layer.paste(logo_resized, (x, y))
 
-    return Image.alpha_composite(image, layer)
+    result = Image.alpha_composite(image, layer)
+    # 释放中间大对象（layer 与 image 同尺寸）
+    del layer, logo_resized
+    return result
 
 
 def add_text_watermark(
@@ -128,4 +131,6 @@ def add_text_watermark(
     image = image.convert("RGBA")
     font_size = max(12, int(image.width * text_ratio))
     text_img = _create_text_watermark(text, color, font_size)
-    return add_logo(image, text_img, position=position, logo_ratio=0.3, opacity=opacity, tile=tile)
+    result = add_logo(image, text_img, position=position, logo_ratio=0.3, opacity=opacity, tile=tile)
+    del text_img
+    return result

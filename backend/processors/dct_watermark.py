@@ -625,7 +625,15 @@ class DCTWatermark:
 
         # 10. 钳位并转回 PIL Image
         rgb = np.clip(rgb, 0, 255).astype(np.uint8)
-        return Image.fromarray(rgb, "RGB").convert("RGBA")
+        result = Image.fromarray(rgb, "RGB").convert("RGBA")
+
+        # 释放中间大数组（rgb float64、Y、Cb、Cr、块数组、ΔY 等）
+        del rgb, Y, blocks, dct_blocks, dct_flat, ac_energy
+        del Y_modified, delta_Y, embed_dct, bits_arr
+        if self.config.use_subject_mask:
+            del Cb, Cr, subject_mask, mask_overlap
+
+        return result
 
     def extract(self, image: Image.Image, strength: Optional[int] = None) -> Optional[str]:
         """

@@ -999,8 +999,11 @@ async function startProcess() {
         document.getElementById('progressPercent').textContent = '0%';
         document.getElementById('progressFill').style.width = '0%';
         document.getElementById('progressFill').classList.remove('done');
-        // 清除旧结果卡片，避免累积
-        document.getElementById('resultGrid').innerHTML = '';
+        // 清除前一批次中残留的处理中卡片（保留已完成的结果）
+        document.querySelectorAll('#resultGrid .result-card .status-processing').forEach(el => {
+            const card = el.closest('.result-card');
+            if (card) card.remove();
+        });
         document.getElementById('resultPagination').innerHTML = '';
         document.getElementById('resultPagination').classList.add('hidden');
         initResultCards(data.batch_id);

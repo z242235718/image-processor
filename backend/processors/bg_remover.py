@@ -1,10 +1,15 @@
+import gc
 import io
 import os
+import threading
 import httpx
 from PIL import Image
 from rembg import remove, new_session
 
 _session_cache = {}
+_session_cache_lock = threading.Lock()
+_active_batches = 0
+_batch_count_lock = threading.Lock()
 
 
 def _translate_model_name(name: str) -> str:
@@ -13,26 +18,62 @@ def _translate_model_name(name: str) -> str:
         "rmbg-1.4": "bria-rmbg",
         "birefnet": "birefnet-general",
         "rmbg-2.0": "bria-rmbg",
-        "u2net": "u2net",
-        "u2netp": "u2netp",
     }
-    return mapping.get(name, name)
+    # 已移除模型（如 u2net）或未知名称 → 回退到默认推荐
+    return mapping.get(name, mapping.get("rmbg-1.4", "bria-rmbg"))
+
+
+def register_batch():
+    """注册一个批处理任务开始，防止其他批次未完成时误释放 session"""
+    global _active_batches
+    with _batch_count_lock:
+        _active_batches += 1
+
+
+def unregister_batch():
+    """一个批处理任务结束，若无其他活动批次则释放模型内存"""
+    global _active_batches
+    with _batch_count_lock:
+        _active_batches -= 1
+        if _active_batches <= 0:
+            with _session_cache_lock:
+                _session_cache.clear()
+            gc.collect()
+
+
+def clear_session_cache():
+    """强制清空所有模型缓存并回收内存（供外部调用）"""
+    global _active_batches
+    with _batch_count_lock:
+        _active_batches = 0
+        with _session_cache_lock:
+            _session_cache.clear()
+        gc.collect()
 
 
 def _get_session(model_name: str, threads: int = 0, disable_arena: bool = True):
-    """缓存 session 避免重复加载模型"""
+    """缓存 session 避免重复加载模型
+
+    rembg 的 new_session() 内部创建 SessionOptions 时，只有 OMP_NUM_THREADS
+    环境变量存在才会设置 intra/inter_op_num_threads；传参给 kwargs 会被忽略。
+    因此需要在调用前设置好环境变量。
+    """
     actual_name = _translate_model_name(model_name)
-    cache_key = f"{actual_name}_t{threads}"
-    if cache_key not in _session_cache:
-        _session_cache[cache_key] = new_session(
-            actual_name,
-            intra_op_num_threads=threads if threads > 0 else 1,
-            inter_op_num_threads=threads if threads > 0 else 1,
-        )
-    return _session_cache[cache_key]
+    effective_threads = max(threads, 1)
+    cache_key = f"{actual_name}_t{effective_threads}"
+    with _session_cache_lock:
+        if cache_key not in _session_cache:
+            # 让 rembg 在创建 SessionOptions 时控制线程数，避免 OpenBLAS/OMP
+            # 使用默认的高并发数导致内存分配失败（bad allocation）
+            if "OMP_NUM_THREADS" not in os.environ:
+                os.environ["OMP_NUM_THREADS"] = str(effective_threads)
+            if disable_arena:
+                os.environ["ORT_DISABLE_CPU_MEM_ARENA"] = "1"
+            _session_cache[cache_key] = new_session(actual_name)
+        return _session_cache[cache_key]
 
 
-def remove_bg_local(image: Image.Image, model_name: str = "u2net",
+def remove_bg_local(image: Image.Image, model_name: str = "rmbg-1.4",
                     threads: int = 0, disable_arena: bool = True) -> Image.Image:
     """使用 rembg 本地抠图"""
     session = _get_session(model_name, threads, disable_arena)
@@ -65,7 +106,7 @@ def remove_bg_api_sync(image: Image.Image, api_key: str) -> Image.Image:
 
 
 def remove_background(image: Image.Image, method: str = "local", api_key: str = "",
-                      model_name: str = "u2net", threads: int = 0, disable_arena: bool = True) -> Image.Image:
+                      model_name: str = "rmbg-1.4", threads: int = 0, disable_arena: bool = True) -> Image.Image:
     """统一抠图入口（同步）"""
     if method == "none":
         return image.convert("RGBA")

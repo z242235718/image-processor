@@ -100,11 +100,14 @@ def _create_tile_layer(image_size: tuple, text_img: Image.Image, step_x: int, st
 
     # 反预乘 alpha → uint8
     mask = out[:, :, 3:4] > 0.001
-    result = np.zeros((h, w, 4), dtype=np.uint8)
-    result[:, :, :3] = np.where(mask, (out[:, :, :3] / out[:, :, 3:4] * 255), 0).astype(np.uint8)
-    result[:, :, 3] = np.clip(out[:, :, 3] * 255, 0, 255).astype(np.uint8)
+    result_arr = np.zeros((h, w, 4), dtype=np.uint8)
+    result_arr[:, :, :3] = np.where(mask, (out[:, :, :3] / out[:, :, 3:4] * 255), 0).astype(np.uint8)
+    result_arr[:, :, 3] = np.clip(out[:, :, 3] * 255, 0, 255).astype(np.uint8)
 
-    return Image.fromarray(result, "RGBA")
+    # 释放中间大数组（out 是 float32，占 ~16 字节/像素）
+    del out, mask, text_arr, src_all, src_alpha, src_rgb
+
+    return Image.fromarray(result_arr, "RGBA")
 
 
 def add_text_watermark(
@@ -163,7 +166,10 @@ def add_text_watermark(
         x, y = _calculate_position(image.width, image.height, text_img.width, text_img.height, position, margin=20)
         layer.paste(text_img, (x, y))
 
-    return Image.alpha_composite(image, layer)
+    result = Image.alpha_composite(image, layer)
+    # 释放中间大对象
+    del layer, text_img
+    return result
 
 
 # ─── 盲水印 (DCT 中频鲁棒水印 + ECC + 重复嵌入 + 同步模板) ───
@@ -213,7 +219,10 @@ def add_blind_watermark(
         use_subject_mask=use_subject_mask,
     )
     watermaker = DCTWatermark(config)
-    return watermaker.embed(image, text, strength)
+    result = watermaker.embed(image, text, strength)
+    # 释放水印器中的预计算数组和 ECC 实例
+    del watermaker
+    return result
 
 
 def extract_blind_watermark(image: Image.Image) -> str:

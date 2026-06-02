@@ -23,7 +23,7 @@ from backend.models import ProcessResult, TaskStatus
 from backend.task_manager import task_manager
 from backend.file_manager import save_uploaded_file, delete_result_files, get_output_path, cleanup_old_files, periodic_cleanup
 from backend.utils.image_utils import generate_thumbnail
-from backend.processors.bg_remover import remove_background
+from backend.processors.bg_remover import remove_background, register_batch, unregister_batch
 from backend.processors.logo_adder import add_logo
 from backend.processors.watermark import (
     add_text_watermark,
@@ -541,9 +541,15 @@ async def _batch_process(batch_id: str, image_ids: List[str], config: dict, logo
 
             await task_manager.update_result(batch_id, result)
 
+    # 注册批处理，防止并发清理
+    register_batch()
+
     # 并发处理
     tasks = [asyncio.create_task(process_one(iid)) for iid in image_ids]
     await asyncio.gather(*tasks, return_exceptions=True)
+
+    # 所有图片处理完毕，注销 batch；若无其他活动批次则释放模型内存
+    unregister_batch()
 
 
 # ─── WebSocket 进度 ───

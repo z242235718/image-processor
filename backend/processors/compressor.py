@@ -40,64 +40,70 @@ def compress_image(
     """
     img = image.copy()
 
-    # 1) 限宽等比缩放
-    if max_width > 0 and img.width > max_width:
-        ratio = max_width / img.width
-        new_height = int(img.height * ratio)
-        img = img.resize((max_width, new_height), Image.LANCZOS)
+    try:
+        # 1) 限宽等比缩放
+        if max_width > 0 and img.width > max_width:
+            ratio = max_width / img.width
+            new_height = int(img.height * ratio)
+            img = img.resize((max_width, new_height), Image.LANCZOS)
 
-    # 2) JPEG 不支持透明通道
-    if output_format.upper() in ("JPEG", "JPG"):
-        if img.mode == "RGBA":
-            background = Image.new("RGB", img.size, (255, 255, 255))
-            background.paste(img, mask=img.split()[3])
-            img = background
-        elif img.mode != "RGB":
-            img = img.convert("RGB")
+        # 2) JPEG 不支持透明通道
+        if output_format.upper() in ("JPEG", "JPG"):
+            if img.mode == "RGBA":
+                background = Image.new("RGB", img.size, (255, 255, 255))
+                background.paste(img, mask=img.split()[3])
+                img = background
+                del background  # 释放白底背景图
+            elif img.mode != "RGB":
+                img = img.convert("RGB")
 
-    fmt_upper = output_format.upper()
+        fmt_upper = output_format.upper()
 
-    # 3) 目标文件大小约束
-    if max_file_size_kb > 0:
-        target_bytes = max_file_size_kb * 1024
+        # 3) 目标文件大小约束
+        if max_file_size_kb > 0:
+            target_bytes = max_file_size_kb * 1024
 
-        if fmt_upper == "PNG":
-            # PNG 路径：先按 quality 二分，再按颜色数兜底
-            low, high = 1, 100
-            best_data = None
-            while low <= high:
-                mid = (low + high) // 2
-                data = _encode(img, output_format, mid)
-                if len(data) <= target_bytes:
-                    best_data = data
-                    low = mid + 1
-                else:
-                    high = mid - 1
-            if best_data is not None:
-                return best_data
-            # 仍超限 → 按颜色数兜底
-            for n in _PNG_FALLBACK_COLORS:
-                data = _encode_png_fixed_colors(img, n)
-                if len(data) <= target_bytes:
-                    return data
-            return _encode_png_fixed_colors(img, _PNG_FALLBACK_COLORS[-1])
-        else:
-            # JPEG / WEBP 路径：原二分搜索
-            low, high = 1, 95
-            best_data = None
-            while low <= high:
-                mid = (low + high) // 2
-                data = _encode(img, output_format, mid)
-                if len(data) <= target_bytes:
-                    best_data = data
-                    low = mid + 1
-                else:
-                    high = mid - 1
-            if best_data:
-                return best_data
-            return _encode(img, output_format, 1)
+            if fmt_upper == "PNG":
+                # PNG 路径：先按 quality 二分，再按颜色数兜底
+                low, high = 1, 100
+                best_data = None
+                while low <= high:
+                    mid = (low + high) // 2
+                    data = _encode(img, output_format, mid)
+                    if len(data) <= target_bytes:
+                        best_data = data
+                        low = mid + 1
+                    else:
+                        high = mid - 1
+                if best_data is not None:
+                    return best_data
+                # 仍超限 → 按颜色数兜底
+                for n in _PNG_FALLBACK_COLORS:
+                    data = _encode_png_fixed_colors(img, n)
+                    if len(data) <= target_bytes:
+                        return data
+                return _encode_png_fixed_colors(img, _PNG_FALLBACK_COLORS[-1])
+            else:
+                # JPEG / WEBP 路径：原二分搜索
+                low, high = 1, 95
+                best_data = None
+                while low <= high:
+                    mid = (low + high) // 2
+                    data = _encode(img, output_format, mid)
+                    if len(data) <= target_bytes:
+                        best_data = data
+                        low = mid + 1
+                    else:
+                        high = mid - 1
+                if best_data:
+                    return best_data
+                return _encode(img, output_format, 1)
 
-    return _encode(img, output_format, quality)
+        return _encode(img, output_format, quality)
+    finally:
+        # 释放中间副本（可能为大图）
+        if img is not image:
+            del img
 
 
 def _encode(img: Image.Image, fmt: str, quality: int) -> bytes:
