@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form, WebSocket, WebSocketDisconnect, Query, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, WebSocket, WebSocketDisconnect, Query, Request, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,12 +20,13 @@ from PIL import Image, ImageOps
 
 from config import (
     INPUT_DIR, OUTPUT_DIR, TEMP_DIR, ASSETS_DIR, FRONTEND_DIR,
-    CONCURRENT_PROCESS_LIMIT,
+    CONCURRENT_PROCESS_LIMIT, SESSION_CLEANUP_INTERVAL,
 )
 from backend.models import ProcessResult, TaskStatus
 from backend.task_manager import task_manager
 from backend.file_manager import save_uploaded_file, delete_result_files, get_output_path, cleanup_old_files, periodic_cleanup
 from backend.utils.image_utils import generate_thumbnail
+from backend.session_manager import generate_session_id, touch_session, cleanup_expired_sessions, COOKIE_NAME, get_expired_sessions, delete_session_directories, remove_session_index
 from backend.processors.bg_remover import remove_background, register_batch, unregister_batch
 from backend.processors.logo_adder import add_logo
 from backend.processors.watermark import (
@@ -77,9 +78,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 内存存储
-image_store: Dict[str, dict] = {}
-logo_store: Dict[str, dict] = {}
+# 内存存储（session_id -> image_id -> meta）
+image_store: Dict[str, Dict[str, dict]] = {}
+logo_store: Dict[str, Dict[str, dict]] = {}
+
+# ─── Session 中间件 ───
+
+
+@app.middleware("http")
+async def session_middleware(request: Request, call_next):
+    """自动管理 SessionID：首次访问生成并写入 Cookie，后续请求自动携带"""
+    session_id = request.cookies.get(COOKIE_NAME)
+    if not session_id:
+        session_id = generate_session_id()
+    # 更新活动时间（仅在非静态文件请求时，减少磁盘 I/O）
+    path = request.url.path
+    if not path.startswith("/assets/") and not path.startswith("/frontend/"):
+        touch_session(session_id)
+    request.state.session_id = session_id
+    response = await call_next(request)
+    if COOKIE_NAME not in request.cookies:
+        response.set_cookie(
+            key=COOKIE_NAME,
+            value=session_id,
+            httponly=True,
+            max_age=86400 * 30,  # 30 天
+            samesite="lax",
+        )
+    return response
+
 
 # 静态文件
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
@@ -100,23 +127,36 @@ async def sunday_full_cleanup():
         wait_seconds = (next_run - now).total_seconds()
         await asyncio.sleep(wait_seconds)
 
-        # 删除所有结果文件
+        # 删除所有结果文件（保留 session 目录结构）
         for dir_path in [OUTPUT_DIR, TEMP_DIR]:
             if not dir_path.exists():
                 continue
             for f in dir_path.iterdir():
                 try:
-                    os.remove(f)
+                    if f.is_file():
+                        os.remove(f)
+                    elif f.is_dir():
+                        shutil.rmtree(f, ignore_errors=True)
                 except OSError:
                     pass
 
 
+async def periodic_session_cleanup():
+    """后台定时任务：清理过期 Session 的资源"""
+    while True:
+        await asyncio.sleep(SESSION_CLEANUP_INTERVAL)
+        count = cleanup_expired_sessions()
+        # 同时清理普通过期文件
+        cleanup_old_files()
+
+
 @app.on_event("startup")
 async def startup():
-    # 启动时立即清理过期文件（超过 7 天的结果）
+    # 启动时立即清理过期 Session 和文件
+    cleanup_expired_sessions()
     cleanup_old_files()
-    # 后台定时任务：每小时清理过期文件
-    asyncio.create_task(periodic_cleanup())
+    # 后台定时任务：每小时清理过期 Session + 文件
+    asyncio.create_task(periodic_session_cleanup())
     # 后台定时任务：每周日 03:00 彻底清理所有结果
     asyncio.create_task(sunday_full_cleanup())
 
@@ -131,15 +171,16 @@ async def index():
 # ─── 上传 ───
 
 @app.post("/api/upload")
-async def upload_images(files: List[UploadFile] = File(...)):
+async def upload_images(request: Request, files: List[UploadFile] = File(...)):
+    session_id = request.state.session_id
     uploaded = []
     for file in files:
         if not file.filename:
             continue
         try:
             content = await file.read()
-            meta = save_uploaded_file(content, file.filename)
-            image_store[meta["id"]] = meta
+            meta = save_uploaded_file(content, file.filename, session_id=session_id)
+            image_store.setdefault(session_id, {})[meta["id"]] = meta
             uploaded.append(meta)
         except ValueError as e:
             continue  # 跳过不合法文件
@@ -148,13 +189,14 @@ async def upload_images(files: List[UploadFile] = File(...)):
 
 
 @app.post("/api/upload-logo")
-async def upload_logo(file: UploadFile = File(...)):
+async def upload_logo(request: Request, file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(status_code=400, detail="无效文件")
     try:
+        session_id = request.state.session_id
         content = await file.read()
-        meta = save_uploaded_file(content, file.filename)
-        logo_store[meta["id"]] = meta
+        meta = save_uploaded_file(content, file.filename, session_id=session_id)
+        logo_store.setdefault(session_id, {})[meta["id"]] = meta
         return {"logo_id": meta["id"], "thumbnail_url": meta["thumbnail_url"]}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -163,53 +205,59 @@ async def upload_logo(file: UploadFile = File(...)):
 # ─── 图片管理 ───
 
 @app.get("/api/images")
-async def list_images():
-    images = list(image_store.values())
+async def list_images(request: Request):
+    session_id = request.state.session_id
+    images = list(image_store.get(session_id, {}).values())
     return {"images": images}
 
 
 @app.delete("/api/images/{image_id}")
-async def delete_image(image_id: str):
-    if image_id not in image_store:
+async def delete_image(request: Request, image_id: str):
+    session_id = request.state.session_id
+    session_images = image_store.get(session_id, {})
+    if image_id not in session_images:
         raise HTTPException(status_code=404, detail="图片不存在")
-    image_store.pop(image_id)
+    session_images.pop(image_id)
     # 仅移除内存记录，不删除源文件，避免已存在的结果卡片预览失效
     return {"ok": True}
 
 
 @app.delete("/api/results")
-async def clear_all_results():
-    """清除所有处理结果文件（输出+临时目录），保留原始上传"""
-    for dir_path in [OUTPUT_DIR, TEMP_DIR]:
-        for f in dir_path.iterdir():
-            try:
-                os.remove(f)
-            except OSError:
-                pass
+async def clear_all_results(request: Request):
+    """清除当前 session 的所有处理结果文件（输出+临时目录），保留原始上传"""
+    session_id = request.state.session_id
+    for base_dir in [OUTPUT_DIR, TEMP_DIR]:
+        session_dir = base_dir / session_id
+        if session_dir.exists():
+            shutil.rmtree(session_dir, ignore_errors=True)
     return {"ok": True}
 
 
 @app.get("/api/results")
-async def list_all_results():
-    """列出所有已保存的处理结果（供页面刷新后重新加载结果卡片）"""
+async def list_all_results(request: Request):
+    """列出当前 session 的所有已保存处理结果（供页面刷新后重新加载结果卡片）"""
+    session_id = request.state.session_id
+    session_temp = TEMP_DIR / session_id
     results = []
-    for f in TEMP_DIR.iterdir():
-        if f.name.endswith("_meta.json"):
-            try:
-                with open(f) as mf:
-                    data = json.load(mf)
-                results.append(data)
-            except Exception:
-                pass
+    if session_temp.exists():
+        for f in session_temp.iterdir():
+            if f.name.endswith("_meta.json"):
+                try:
+                    with open(f) as mf:
+                        data = json.load(mf)
+                    results.append(data)
+                except Exception:
+                    pass
     # 按完成时间降序排列
     results.sort(key=lambda r: r.get("finished_at", ""), reverse=True)
     return {"results": results}
 
 
 @app.delete("/api/results/{image_id}")
-async def delete_result(image_id: str, run_id: str = Query("")):
-    """只删除处理结果，保留原始上传图片"""
-    delete_result_files(image_id, run_id=run_id)
+async def delete_result(request: Request, image_id: str, run_id: str = Query("")):
+    """只删除当前 session 的处理结果，保留原始上传图片"""
+    session_id = request.state.session_id
+    delete_result_files(image_id, run_id=run_id, session_id=session_id)
     return {"ok": True}
 
 
@@ -225,46 +273,60 @@ async def get_default_logo():
 
 
 @app.get("/api/thumbnail/{image_id}")
-async def get_thumbnail(image_id: str):
-    thumb_path = TEMP_DIR / f"{image_id}_thumb.png"
+async def get_thumbnail(request: Request, image_id: str):
+    session_id = request.state.session_id
+    session_temp = TEMP_DIR / session_id
+    thumb_path = session_temp / f"{image_id}_thumb.png"
     if thumb_path.exists():
         return FileResponse(thumb_path, media_type="image/png")
-    meta = image_store.get(image_id)
+    meta = image_store.get(session_id, {}).get(image_id)
     if meta and os.path.exists(meta["path"]):
         return FileResponse(meta["path"])
+    # 回退：从 session 的 input 目录下直接找原图
+    session_input = INPUT_DIR / session_id
+    for ext in ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.tif']:
+        path = session_input / f"{image_id}{ext}"
+        if path.exists():
+            return FileResponse(path)
     raise HTTPException(status_code=404, detail="缩略图不存在")
 
 
 @app.get("/api/original/{image_id}")
-async def get_original(image_id: str):
-    meta = image_store.get(image_id)
+async def get_original(request: Request, image_id: str):
+    session_id = request.state.session_id
+    meta = image_store.get(session_id, {}).get(image_id)
     if meta and os.path.exists(meta["path"]):
         return FileResponse(meta["path"])
-    # 如果内存记录已被删除，直接从磁盘查找文件
+    # 如果内存记录已被删除，直接从 session 的 input 目录查找
+    session_input = INPUT_DIR / session_id
     for ext in ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.tif']:
-        path = INPUT_DIR / f"{image_id}{ext}"
+        path = session_input / f"{image_id}{ext}"
         if path.exists():
             return FileResponse(path)
     raise HTTPException(status_code=404, detail="原图不存在")
 
 
 @app.get("/api/cutout/{image_id}")
-async def get_cutout(image_id: str):
+async def get_cutout(request: Request, image_id: str):
     """获取抠图结果 PNG（含透明通道），供编辑器使用"""
-    cutout_path = TEMP_DIR / f"{image_id}_cutout.png"
+    session_id = request.state.session_id
+    session_temp = TEMP_DIR / session_id
+    cutout_path = session_temp / f"{image_id}_cutout.png"
     if cutout_path.exists():
         return FileResponse(cutout_path, media_type="image/png")
     # 没有抠图结果则回退到原图
-    meta = image_store.get(image_id)
+    meta = image_store.get(session_id, {}).get(image_id)
     if meta and os.path.exists(meta["path"]):
         return FileResponse(meta["path"])
     raise HTTPException(status_code=404, detail="抠图结果不存在")
 
 
 @app.get("/api/last-mask/{image_id}")
-async def get_last_mask(image_id: str):
+async def get_last_mask(request: Request, image_id: str):
     """获取该图片最近一次保存的蒙版 PNG，供「再次编辑」预填画板。"""
-    last_mask_path = TEMP_DIR / f"{image_id}_last_mask.png"
+    session_id = request.state.session_id
+    session_temp = TEMP_DIR / session_id
+    last_mask_path = session_temp / f"{image_id}_last_mask.png"
     if not last_mask_path.exists():
         raise HTTPException(status_code=404, detail="尚未保存过蒙版")
     return FileResponse(last_mask_path, media_type="image/png")
@@ -274,6 +336,7 @@ async def get_last_mask(image_id: str):
 
 @app.post("/api/process")
 async def process_images(
+    request: Request,
     bg_method: str = Form("none"),
     bg_model: str = Form("rmbg-1.4"),
     api_key: str = Form(""),
@@ -307,22 +370,24 @@ async def process_images(
     target_image_id: Optional[str] = Form(None),
     image_ids: Optional[str] = Form(None),
 ):
-    if not image_store:
+    session_id = request.state.session_id
+    session_images = image_store.get(session_id, {})
+    if not session_images:
         raise HTTPException(status_code=400, detail="请先上传图片")
 
     # 如果带了蒙版 + target_image_id，则只处理这一张
-    if mask is not None and target_image_id and target_image_id in image_store:
+    if mask is not None and target_image_id and target_image_id in session_images:
         image_ids_list = [target_image_id]
     elif image_ids:
         # 前端指定了要处理的图片 ID，只处理这些
-        ids = [iid.strip() for iid in image_ids.split(",") if iid.strip() in image_store]
+        ids = [iid.strip() for iid in image_ids.split(",") if iid.strip() in session_images]
         if not ids:
             raise HTTPException(status_code=400, detail="没有有效的图片 ID")
         image_ids_list = ids
     else:
-        image_ids_list = list(image_store.keys())
-    filenames = [image_store[iid]["filename"] for iid in image_ids_list]
-    task = task_manager.create_task(image_ids_list, filenames)
+        image_ids_list = list(session_images.keys())
+    filenames = [session_images[iid]["filename"] for iid in image_ids_list]
+    task = task_manager.create_task(image_ids_list, filenames, session_id=session_id)
     task.status = TaskStatus.RUNNING
 
     # 预读蒙版字节（mask 是一次性的 UploadFile）
@@ -362,30 +427,31 @@ async def process_images(
         "max_width": max_width,
     }
 
-    # 加载 Logo
+    # 加载 Logo（从当前 session 的 logo_store 中查找）
     logo_img = None
     if logo_enabled:
-        if logo_file_id and logo_file_id in logo_store:
-            logo_img = Image.open(logo_store[logo_file_id]["path"]).convert("RGBA")
+        session_logos = logo_store.get(session_id, {})
+        if logo_file_id and logo_file_id in session_logos:
+            logo_img = Image.open(session_logos[logo_file_id]["path"]).convert("RGBA")
         else:
             logo_path = ASSETS_DIR / "logo.png"
             if logo_path.exists():
                 logo_img = Image.open(logo_path).convert("RGBA")
 
-    asyncio.create_task(_batch_process(task.batch_id, image_ids_list, config, logo_img, mask_bytes))
+    asyncio.create_task(_batch_process(task.batch_id, image_ids_list, config, logo_img, mask_bytes, session_id=session_id))
     # 保持引用防止被垃圾回收
     asyncio.current_task().add_done_callback(lambda _: None)
     return {"batch_id": task.batch_id, "total": task.total, "image_ids": image_ids_list}
 
 
-async def _batch_process(batch_id: str, image_ids: List[str], config: dict, logo_img, mask_bytes: Optional[bytes] = None):
+async def _batch_process(batch_id: str, image_ids: List[str], config: dict, logo_img, mask_bytes: Optional[bytes] = None, session_id: str = ""):
     semaphore = asyncio.Semaphore(CONCURRENT_PROCESS_LIMIT)
 
     async def process_one(image_id: str):
         async with semaphore:
             if task_manager.is_cancelled(batch_id):
                 return
-            meta = image_store.get(image_id)
+            meta = image_store.get(session_id, {}).get(image_id)
             if not meta:
                 result = ProcessResult(id=image_id, filename="unknown", status="error", error_msg="原始图片已不存在")
                 await task_manager.update_result(batch_id, result)
@@ -408,7 +474,8 @@ async def _batch_process(batch_id: str, image_ids: List[str], config: dict, logo
                         config["bg_model"], config["bg_threads"], config["bg_disable_arena"]
                     )
                     # 始终存一份 PNG 抠图结果（含透明通道），供编辑器使用
-                    cutout_path = TEMP_DIR / f"{image_id}_cutout.png"
+                    cutout_path = TEMP_DIR / session_id / f"{image_id}_cutout.png"
+                    cutout_path.parent.mkdir(parents=True, exist_ok=True)
                     await asyncio.to_thread(img.save, str(cutout_path), "PNG")
 
                 # 2. Logo (图片型)
@@ -458,7 +525,8 @@ async def _batch_process(batch_id: str, image_ids: List[str], config: dict, logo
                         await task_manager.update_result(batch_id, result); return
                     img = await asyncio.to_thread(apply_mask_crop, img, mask_bytes)
                     # 保存蒙版供「再次编辑」预填
-                    last_mask_path = TEMP_DIR / f"{image_id}_last_mask.png"
+                    last_mask_path = TEMP_DIR / session_id / f"{image_id}_last_mask.png"
+                    last_mask_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(last_mask_path, "wb") as f:
                         f.write(mask_bytes)
 
@@ -492,14 +560,17 @@ async def _batch_process(batch_id: str, image_ids: List[str], config: dict, logo
                 # 保存
                 ext_map = {"JPEG": ".jpg", "JPG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
                 ext = ext_map.get(config["output_format"].upper(), ".jpg")
-                out_path = get_output_path(image_id, ext, run_id=batch_id)
+                out_path = get_output_path(image_id, ext, run_id=batch_id, session_id=session_id)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(out_path, "wb") as f:
                     f.write(data)
 
                 # 生成结果缩略图
                 out_img = Image.open(out_path)
                 thumb_data = generate_thumbnail(out_img)
-                thumb_path = TEMP_DIR / f"{image_id}_{batch_id}_result_thumb.png"
+                session_temp = TEMP_DIR / session_id
+                session_temp.mkdir(parents=True, exist_ok=True)
+                thumb_path = session_temp / f"{image_id}_{batch_id}_result_thumb.png"
                 with open(thumb_path, "wb") as f:
                     f.write(thumb_data)
 
@@ -511,7 +582,7 @@ async def _batch_process(batch_id: str, image_ids: List[str], config: dict, logo
                 result.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                 # 保存结果元数据（持久化，供页面刷新后重新加载结果卡片）
-                meta_path = TEMP_DIR / f"{image_id}_{batch_id}_meta.json"
+                meta_path = session_temp / f"{image_id}_{batch_id}_meta.json"
                 try:
                     features_str = _compute_features_str(
                         bg_method=config["bg_method"],
@@ -560,6 +631,7 @@ async def _batch_process(batch_id: str, image_ids: List[str], config: dict, logo
 @app.websocket("/api/ws/progress/{batch_id}")
 async def websocket_progress(websocket: WebSocket, batch_id: str):
     await websocket.accept()
+    # 验证 session 是否匹配（batch_id 嵌入 session_id[:8] 前缀）
     task = task_manager.get_task(batch_id)
 
     if not task:
@@ -610,46 +682,51 @@ async def get_progress(batch_id: str):
 # ─── 下载 ───
 
 @app.get("/api/download/{image_id}")
-async def download_single(image_id: str):
+async def download_single(request: Request, image_id: str):
+    session_id = request.state.session_id
     for ext in [".jpg", ".png", ".webp"]:
-        path = get_output_path(image_id, ext)
+        path = get_output_path(image_id, ext, session_id=session_id)
         if path.exists():
             return FileResponse(path, filename=path.name)
     # 回退到原始文件
-    meta = image_store.get(image_id)
+    meta = image_store.get(session_id, {}).get(image_id)
     if meta and os.path.exists(meta["path"]):
         return FileResponse(meta["path"], filename=meta["filename"])
     raise HTTPException(status_code=404, detail="文件不存在")
 
 
 @app.get("/api/download/{run_id}/{image_id}")
-async def download_single_run(run_id: str, image_id: str):
+async def download_single_run(request: Request, run_id: str, image_id: str):
+    session_id = request.state.session_id
     for ext in [".jpg", ".png", ".webp"]:
-        path = get_output_path(image_id, ext, run_id=run_id)
+        path = get_output_path(image_id, ext, run_id=run_id, session_id=session_id)
         if path.exists():
             return FileResponse(path, filename=path.name)
     raise HTTPException(status_code=404, detail="文件不存在")
 
 
 @app.get("/api/result-thumbnail/{image_id}")
-async def get_result_thumbnail(image_id: str):
-    thumb_path = TEMP_DIR / f"{image_id}_result_thumb.png"
+async def get_result_thumbnail(request: Request, image_id: str):
+    session_id = request.state.session_id
+    thumb_path = TEMP_DIR / session_id / f"{image_id}_result_thumb.png"
     if thumb_path.exists():
         return FileResponse(thumb_path, media_type="image/png")
     raise HTTPException(status_code=404, detail="结果缩略图不存在")
 
 
 @app.get("/api/result-thumbnail/{run_id}/{image_id}")
-async def get_result_thumbnail_run(run_id: str, image_id: str):
-    thumb_path = TEMP_DIR / f"{image_id}_{run_id}_result_thumb.png"
+async def get_result_thumbnail_run(request: Request, run_id: str, image_id: str):
+    session_id = request.state.session_id
+    thumb_path = TEMP_DIR / session_id / f"{image_id}_{run_id}_result_thumb.png"
     if thumb_path.exists():
         return FileResponse(thumb_path, media_type="image/png")
     raise HTTPException(status_code=404, detail="结果缩略图不存在")
 
 
 @app.post("/api/download-all")
-async def download_all(data: dict):
-    """打包当前界面可见的处理结果"""
+async def download_all(request: Request, data: dict):
+    """打包当前 session 界面可见的处理结果"""
+    session_id = request.state.session_id
     items = data.get("items", [])
     if not items:
         raise HTTPException(status_code=400, detail="没有可下载的处理结果")
@@ -659,7 +736,7 @@ async def download_all(data: dict):
             run_id = item.get("run_id", "")
             image_id = item.get("image_id", "")
             for ext in [".jpg", ".png", ".webp"]:
-                path = get_output_path(image_id, ext, run_id=run_id)
+                path = get_output_path(image_id, ext, run_id=run_id, session_id=session_id)
                 if path.exists():
                     zf.write(path, path.name)
                     break
@@ -708,15 +785,16 @@ async def extract_watermark(file: UploadFile = File(...)):
 
 
 @app.get("/api/extract-watermark/{run_id}/{image_id}")
-async def extract_watermark_from_result(run_id: str, image_id: str):
+async def extract_watermark_from_result(request: Request, run_id: str, image_id: str):
     """
     从已处理结果文件中直接提取盲水印（服务器端读取，避免客户端下载再上传）
 
     适用于结果卡片上的"提取水印"按钮，速度远快于 POST 上传方式。
     """
+    session_id = request.state.session_id
     img = None
     for ext in [".jpg", ".png", ".webp"]:
-        path = get_output_path(image_id, ext, run_id=run_id)
+        path = get_output_path(image_id, ext, run_id=run_id, session_id=session_id)
         if path.exists():
             img = Image.open(path)
             break
@@ -744,6 +822,7 @@ async def extract_watermark_from_result(run_id: str, image_id: str):
 
 @app.post("/api/reprocess")
 async def reprocess_image(
+    request: Request,
     source_run_id: str = Form(...),
     source_image_id: str = Form(...),
     # 去除背景
@@ -785,10 +864,11 @@ async def reprocess_image(
     mask: Optional[UploadFile] = File(None),
 ):
     """对已处理结果继续处理（抠图/Logo/水印/盲水印/压缩）"""
+    session_id = request.state.session_id
     # 加载已处理的结果文件
     img = None
     for ext in [".jpg", ".png", ".webp"]:
-        path = get_output_path(source_image_id, ext, run_id=source_run_id)
+        path = get_output_path(source_image_id, ext, run_id=source_run_id, session_id=session_id)
         if path.exists():
             img = Image.open(path)
             break
@@ -804,14 +884,16 @@ async def reprocess_image(
     if bg_enabled:
         os.environ["ORT_DISABLE_CPU_MEM_ARENA"] = "1" if bg_disable_arena else "0"
         img = remove_background(img, bg_method, api_key, bg_model, bg_threads, bg_disable_arena)
-        cutout_path = TEMP_DIR / f"{source_image_id}_cutout.png"
+        cutout_path = TEMP_DIR / session_id / f"{source_image_id}_cutout.png"
+        cutout_path.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(img.save, str(cutout_path), "PNG")
 
     # 2. Logo
     if logo_enabled:
         logo_img = None
-        if logo_file_id and logo_file_id in logo_store:
-            logo_img = Image.open(logo_store[logo_file_id]["path"]).convert("RGBA")
+        session_logos = logo_store.get(session_id, {})
+        if logo_file_id and logo_file_id in session_logos:
+            logo_img = Image.open(session_logos[logo_file_id]["path"]).convert("RGBA")
         else:
             logo_path = ASSETS_DIR / "logo.png"
             if logo_path.exists():
@@ -836,7 +918,8 @@ async def reprocess_image(
     if mask_bytes:
         img = apply_mask_crop(img, mask_bytes)
         # 保存蒙版供「再次编辑」预填
-        last_mask_path = TEMP_DIR / f"{source_image_id}_last_mask.png"
+        last_mask_path = TEMP_DIR / session_id / f"{source_image_id}_last_mask.png"
+        last_mask_path.parent.mkdir(parents=True, exist_ok=True)
         with open(last_mask_path, "wb") as f:
             f.write(mask_bytes)
 
@@ -858,20 +941,23 @@ async def reprocess_image(
     new_run_id = f"reprocess-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
     ext_map = {"JPEG": ".jpg", "JPG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
     ext = ext_map.get(output_format.upper(), ".jpg")
-    out_path = get_output_path(source_image_id, ext, run_id=new_run_id)
+    out_path = get_output_path(source_image_id, ext, run_id=new_run_id, session_id=session_id)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as f:
         f.write(data)
 
     # 结果缩略图
     out_img = Image.open(out_path)
     thumb_data = generate_thumbnail(out_img)
-    thumb_path = TEMP_DIR / f"{source_image_id}_{new_run_id}_result_thumb.png"
+    session_temp = TEMP_DIR / session_id
+    session_temp.mkdir(parents=True, exist_ok=True)
+    thumb_path = session_temp / f"{source_image_id}_{new_run_id}_result_thumb.png"
     with open(thumb_path, "wb") as f:
         f.write(thumb_data)
 
     # 保存结果元数据（持久化）
     _finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    meta_path = TEMP_DIR / f"{source_image_id}_{new_run_id}_meta.json"
+    meta_path = session_temp / f"{source_image_id}_{new_run_id}_meta.json"
     try:
         reprocess_features_str = _compute_features_str(
             bg_method=bg_method if bg_enabled else "none",
@@ -910,6 +996,7 @@ async def reprocess_image(
 
 @app.post("/api/edit-mask/{image_id}")
 async def edit_mask(
+    request: Request,
     image_id: str,
     mask: UploadFile = File(...),
     logo_enabled: bool = Form(False),
@@ -938,7 +1025,8 @@ async def edit_mask(
     max_width: int = Form(0),
 ):
     """接收前端 Canvas 编辑后的蒙版，按蒙版白色像素的最小包围矩形裁切后重新合成。"""
-    meta = image_store.get(image_id)
+    session_id = request.state.session_id
+    meta = image_store.get(session_id, {}).get(image_id)
     if not meta:
         raise HTTPException(status_code=404, detail="图片不存在")
 
@@ -956,19 +1044,22 @@ async def edit_mask(
         if mask_bytes:
             result_img = await asyncio.to_thread(apply_mask_crop, result_img, mask_bytes)
             # 保存蒙版供「再次编辑」预填
-            last_mask_path = TEMP_DIR / f"{image_id}_last_mask.png"
+            last_mask_path = TEMP_DIR / session_id / f"{image_id}_last_mask.png"
+            last_mask_path.parent.mkdir(parents=True, exist_ok=True)
             with open(last_mask_path, "wb") as f:
                 f.write(mask_bytes)
 
         # 更新 cutout.png（不含 Logo/压缩），供后续再次编辑使用
-        cutout_path = TEMP_DIR / f"{image_id}_cutout.png"
+        cutout_path = TEMP_DIR / session_id / f"{image_id}_cutout.png"
+        cutout_path.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(result_img.save, str(cutout_path), "PNG")
 
         # Logo (图片型)
         if logo_enabled:
             logo_img = None
-            if logo_file_id and logo_file_id in logo_store:
-                logo_img = Image.open(logo_store[logo_file_id]["path"]).convert("RGBA")
+            session_logos = logo_store.get(session_id, {})
+            if logo_file_id and logo_file_id in session_logos:
+                logo_img = Image.open(session_logos[logo_file_id]["path"]).convert("RGBA")
             else:
                 logo_path = ASSETS_DIR / "logo.png"
                 if logo_path.exists():
@@ -1006,20 +1097,23 @@ async def edit_mask(
         edit_run_id = f"edit-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
         ext_map = {"JPEG": ".jpg", "JPG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
         ext = ext_map.get(output_format.upper(), ".jpg")
-        out_path = get_output_path(image_id, ext, run_id=edit_run_id)
+        out_path = get_output_path(image_id, ext, run_id=edit_run_id, session_id=session_id)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "wb") as f:
             f.write(data)
 
         # 更新缩略图
         out_img = Image.open(out_path)
         thumb_data = generate_thumbnail(out_img)
-        thumb_path = TEMP_DIR / f"{image_id}_{edit_run_id}_result_thumb.png"
+        session_temp = TEMP_DIR / session_id
+        session_temp.mkdir(parents=True, exist_ok=True)
+        thumb_path = session_temp / f"{image_id}_{edit_run_id}_result_thumb.png"
         with open(thumb_path, "wb") as f:
             f.write(thumb_data)
 
         # 保存结果元数据（持久化）
         _finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        meta_path = TEMP_DIR / f"{image_id}_{edit_run_id}_meta.json"
+        meta_path = session_temp / f"{image_id}_{edit_run_id}_meta.json"
         try:
             edit_features_str = _compute_features_str(
                 logo_enabled=logo_enabled,
@@ -1059,6 +1153,7 @@ async def edit_mask(
 
 @app.post("/api/edit-cutout/{image_id}")
 async def edit_cutout(
+    request: Request,
     image_id: str,
     mask: UploadFile = File(...),
     logo_enabled: bool = Form(False),
@@ -1087,7 +1182,9 @@ async def edit_cutout(
     max_width: int = Form(0),
 ):
     """接收 Canvas 笔刷编辑后的抠图蒙版，修改透明通道后重新合成。"""
-    cutout_path = TEMP_DIR / f"{image_id}_cutout.png"
+    session_id = request.state.session_id
+    session_temp = TEMP_DIR / session_id
+    cutout_path = session_temp / f"{image_id}_cutout.png"
     if not cutout_path.exists():
         raise HTTPException(status_code=404, detail="抠图结果不存在，请先进行抠图处理")
 
@@ -1114,7 +1211,7 @@ async def edit_cutout(
         updated_cutout.save(cutout_path, "PNG")
 
         # 保存蒙版供再次编辑
-        last_mask_path = TEMP_DIR / f"{image_id}_last_cutout_mask.png"
+        last_mask_path = session_temp / f"{image_id}_last_cutout_mask.png"
         with open(last_mask_path, "wb") as f:
             f.write(mask_bytes)
 
@@ -1124,8 +1221,9 @@ async def edit_cutout(
         # Logo
         if logo_enabled:
             logo_img = None
-            if logo_file_id and logo_file_id in logo_store:
-                logo_img = Image.open(logo_store[logo_file_id]["path"]).convert("RGBA")
+            session_logos = logo_store.get(session_id, {})
+            if logo_file_id and logo_file_id in session_logos:
+                logo_img = Image.open(session_logos[logo_file_id]["path"]).convert("RGBA")
             else:
                 logo_path = ASSETS_DIR / "logo.png"
                 if logo_path.exists():
@@ -1160,20 +1258,22 @@ async def edit_cutout(
         new_run_id = f"cutout-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
         ext_map = {"JPEG": ".jpg", "JPG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
         ext = ext_map.get(output_format.upper(), ".jpg")
-        out_path = get_output_path(image_id, ext, run_id=new_run_id)
+        out_path = get_output_path(image_id, ext, run_id=new_run_id, session_id=session_id)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "wb") as f:
             f.write(data)
 
         # 结果缩略图
         out_img = Image.open(out_path)
         thumb_data = generate_thumbnail(out_img)
-        thumb_path = TEMP_DIR / f"{image_id}_{new_run_id}_result_thumb.png"
+        session_temp.mkdir(parents=True, exist_ok=True)
+        thumb_path = session_temp / f"{image_id}_{new_run_id}_result_thumb.png"
         with open(thumb_path, "wb") as f:
             f.write(thumb_data)
 
         # 结果元数据（持久化）
         _finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        meta_path = TEMP_DIR / f"{image_id}_{new_run_id}_meta.json"
+        meta_path = session_temp / f"{image_id}_{new_run_id}_meta.json"
         try:
             cutout_features_str = _compute_features_str(
                 bg_method="local",  # edit-cutout 一定是先做了抠图
@@ -1215,9 +1315,18 @@ async def edit_cutout(
 # ─── 清理 ───
 
 @app.post("/api/cleanup")
-async def cleanup():
-    from backend.file_manager import cleanup_old_files
-    await asyncio.to_thread(cleanup_old_files)
+async def cleanup(request: Request):
+    session_id = request.state.session_id
+    # 清理当前 session 的过期的文件
+    for base_dir in [INPUT_DIR, OUTPUT_DIR, TEMP_DIR]:
+        session_dir = base_dir / session_id
+        if session_dir.exists():
+            for f in session_dir.iterdir():
+                try:
+                    if f.is_file():
+                        os.remove(f)
+                except OSError:
+                    pass
     return {"ok": True}
 
 

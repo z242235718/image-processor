@@ -21,6 +21,10 @@ CONCURRENT_PROCESS_LIMIT = 4
 # 文件清理（结果文件保留 7 天）
 CLEANUP_AGE_HOURS = 168
 
+# Session 管理（同一台机器不同浏览器隔离 + 过期清理，8 小时无活动自动清除）
+SESSION_TIMEOUT_HOURS = 8
+SESSION_CLEANUP_INTERVAL = 3600  # 清理检查间隔（秒）
+
 # remove.bg API Key (用于云端抠图)
 REMBG_API_KEY = "test123"
 

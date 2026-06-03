@@ -4,7 +4,9 @@
 import os
 import uuid
 import asyncio
+import shutil
 from pathlib import Path
+from typing import Optional
 from PIL import Image, ImageOps
 
 from config import INPUT_DIR, OUTPUT_DIR, TEMP_DIR, CLEANUP_AGE_HOURS
@@ -12,8 +14,35 @@ from backend.utils.image_utils import generate_thumbnail
 from backend.utils.validators import validate_extension, validate_magic_bytes, validate_file_size
 
 
-def save_uploaded_file(content: bytes, original_filename: str) -> dict:
-    """保存上传文件，返回元数据"""
+# ─── Session 目录辅助 ───
+
+
+def get_session_input_dir(session_id: str) -> Path:
+    """返回当前 session 的 input 子目录，自动创建"""
+    d = INPUT_DIR / session_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def get_session_output_dir(session_id: str) -> Path:
+    """返回当前 session 的 output 子目录，自动创建"""
+    d = OUTPUT_DIR / session_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def get_session_temp_dir(session_id: str) -> Path:
+    """返回当前 session 的 temp 子目录，自动创建"""
+    d = TEMP_DIR / session_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# ─── 文件操作 ───
+
+
+def save_uploaded_file(content: bytes, original_filename: str, session_id: str = "") -> dict:
+    """保存上传文件，返回元数据（session_id 非空时写入 session 子目录）"""
     if not validate_extension(original_filename):
         raise ValueError(f"不支持的文件格式: {original_filename}")
     if not validate_file_size(len(content)):
@@ -23,7 +52,12 @@ def save_uploaded_file(content: bytes, original_filename: str) -> dict:
 
     ext = Path(original_filename).suffix.lower()
     image_id = str(uuid.uuid4())[:8]
-    save_path = INPUT_DIR / f"{image_id}{ext}"
+
+    if session_id:
+        save_dir = get_session_input_dir(session_id)
+    else:
+        save_dir = INPUT_DIR
+    save_path = save_dir / f"{image_id}{ext}"
     with open(save_path, "wb") as f:
         f.write(content)
 
@@ -32,7 +66,11 @@ def save_uploaded_file(content: bytes, original_filename: str) -> dict:
     img = ImageOps.exif_transpose(img) or img
     width, height = img.size
     thumb_data = generate_thumbnail(img)
-    thumb_path = TEMP_DIR / f"{image_id}_thumb.png"
+    if session_id:
+        thumb_dir = get_session_temp_dir(session_id)
+    else:
+        thumb_dir = TEMP_DIR
+    thumb_path = thumb_dir / f"{image_id}_thumb.png"
     with open(thumb_path, "wb") as f:
         f.write(thumb_data)
 
@@ -47,17 +85,24 @@ def save_uploaded_file(content: bytes, original_filename: str) -> dict:
     }
 
 
-def delete_image_files(image_id: str):
+def delete_image_files(image_id: str, session_id: str = ""):
     """删除原始上传文件（保留已处理的结果文件）"""
+    if session_id:
+        input_dir = get_session_input_dir(session_id)
+        temp_dir = get_session_temp_dir(session_id)
+    else:
+        input_dir = INPUT_DIR
+        temp_dir = TEMP_DIR
+
     # 删除原始输入文件
-    for f in INPUT_DIR.iterdir():
+    for f in input_dir.iterdir():
         if f.name.startswith(image_id):
             try:
                 os.remove(f)
             except OSError:
                 pass
     # 清理原始缩略图和中间文件，但保留结果缩略图
-    for f in TEMP_DIR.iterdir():
+    for f in temp_dir.iterdir():
         if f.name.startswith(image_id) and not f.name.endswith("_result_thumb.png"):
             try:
                 os.remove(f)
@@ -65,9 +110,15 @@ def delete_image_files(image_id: str):
                 pass
 
 
-def delete_result_files(image_id: str, run_id: str = ""):
+def delete_result_files(image_id: str, run_id: str = "", session_id: str = ""):
     """删除图片关联的处理结果文件（保留原始上传文件）"""
-    for dir_path in [OUTPUT_DIR, TEMP_DIR]:
+    dirs = []
+    if session_id:
+        dirs = [get_session_output_dir(session_id), get_session_temp_dir(session_id)]
+    else:
+        dirs = [OUTPUT_DIR, TEMP_DIR]
+
+    for dir_path in dirs:
         for f in dir_path.iterdir():
             if run_id:
                 if f.name.startswith(f"{image_id}_{run_id}"):
@@ -83,14 +134,20 @@ def delete_result_files(image_id: str, run_id: str = ""):
                         pass
 
 
-def get_output_path(image_id: str, ext: str, run_id: str = "") -> Path:
+def get_output_path(image_id: str, ext: str, run_id: str = "", session_id: str = "") -> Path:
+    """构造输出文件路径（session_id 非空时写入 session 子目录）"""
+    if session_id:
+        out_dir = get_session_output_dir(session_id)
+    else:
+        out_dir = OUTPUT_DIR
+
     if run_id:
-        return OUTPUT_DIR / f"{image_id}_{run_id}_processed{ext}"
-    return OUTPUT_DIR / f"{image_id}_processed{ext}"
+        return out_dir / f"{image_id}_{run_id}_processed{ext}"
+    return out_dir / f"{image_id}_processed{ext}"
 
 
 def cleanup_old_files():
-    """清理过期文件"""
+    """清理过期文件（保留 session 目录结构，只清理文件）"""
     import time
 
     now = time.time()

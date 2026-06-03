@@ -15,8 +15,12 @@ class TaskManager:
         self.connections: Dict[str, List[WebSocket]] = {}
         self._cancel_flags: Dict[str, bool] = {}
 
-    def create_task(self, image_ids: List[str], filenames: List[str]) -> BatchTask:
-        batch_id = str(uuid.uuid4())[:8]
+    def create_task(self, image_ids: List[str], filenames: List[str], session_id: str = "") -> BatchTask:
+        # batch_id 嵌入 session_id 前缀，确保全局唯一且可追溯
+        if session_id:
+            batch_id = f"{session_id[:8]}-{uuid.uuid4().hex[:8]}"
+        else:
+            batch_id = str(uuid.uuid4())[:8]
         task = BatchTask(
             batch_id=batch_id,
             total=len(image_ids),
