@@ -1,6 +1,6 @@
 # 🖼️ 图片批量处理工具 (Image Batch Processor)
 
-> 基于 Web 界面的本地图片批量处理工具，无需网络即可运行。支持背景移除（抠图）、Logo 添加、显式水印、智能裁切、压缩输出等功能。数据存储在本地，数据不外泄。
+> 基于 Web 界面的本地图片批量处理工具，所有处理均在用户本机完成，无需联网，注重隐私保护。提供浏览器端 UI，支持批量背景移除(结果手动修改)、Logo 添加、水印嵌入、裁剪、压缩等功能。
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-lightgrey)
@@ -18,7 +18,7 @@
 | 🎨 **去除背景（抠图）** | 基于 rembg + ONNX Runtime 本地推理，智能识别主体。支持 `rmbg-1.4` / `isnet-general` / `u2net` 模型，可调线程数。**无需联网，本地运算** |
 | 🖼️ **添加 Logo** | 支持自定义 Logo 图片，可调整位置、大小比例、透明度、边距，支持平铺模式 |
 | 💧 **显式水印** | 文字水印，支持位置、字体大小、透明度、颜色调节，疏散/密集两种布局，支持多方向平铺 |
-| 🔏 **盲水印** | 还在开发中 |
+| 🔏 **盲水印** | 开发中... |
 | ✂️ **图片裁切** | Canvas 手绘蒙版，按保留区域的最小包围矩形裁切（擦除模式），支持蒙版保存与重新编辑 |
 | 📦 **压缩输出** | 支持 JPEG / PNG / WebP 格式输出，可调节质量、最大文件大小、最大宽高限制。JPG 抠图可自动逼近原图大小 |
 
@@ -130,10 +130,11 @@ chmod +x build/build_mac.sh
 | **后端框架** | Python 3.10+ / FastAPI / Uvicorn |
 | **图片处理** | Pillow (PIL) / rembg / ONNX Runtime / numpy / scipy / scikit-image |
 | **图片压缩** | Pillow 高质量 JPEG 量化 + WebP 有损/无损 |
-| **盲水印** | DCT 中频域嵌入 + Reed-Solomon 纠错码 |
+| **盲水印** | DCT 中频系数嵌入 + Reed-Solomon 纠错编码 + pHash 感知哈希兜底 |
 | **前端** | 原生 HTML5 / CSS3 / JavaScript (ES6+) / Canvas |
 | **实时通信** | WebSocket (asyncio) |
-| **打包** | PyInstaller 6.20+ (onedir) / Inno Setup / create-dmg |
+| **打包分发** | PyInstaller (onedir), Inno Setup (Windows), create-dmg (macOS) |
+| **许可证** | Business Source License 1.1 (2031 年转为 GPL v2.0+) |
 
 ---
 
